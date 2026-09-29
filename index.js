@@ -21,6 +21,7 @@ app.use((req, res, next) => {
 });
 
 app.post('/webhook', async (req, res) => {
+  // Responde ao Telegram instantaneamente para ele não tentar reenviar a mesma mensagem
   res.sendStatus(200);
 
   const message = req.body?.message;
@@ -31,13 +32,14 @@ app.post('/webhook', async (req, res) => {
 
   console.log(`[TRIAGEM] Processando caso do Chat: ${chatId}`);
 
+  // Aciona a Inteligência Artificial e busca o histórico no MongoDB
   const reply = await askGemini(chatId, text);
 
   try {
+    // Envia a resposta final para o cliente no Telegram em modo texto puro
     await axios.post(`${TELEGRAM_API}/sendMessage`, {
       chat_id: chatId,
-      text: reply,
-      parse_mode: 'Markdown'
+      text: reply 
     });
   } catch (error) {
     console.error('[ERRO TELEGRAM]', error.response?.data || error.message);
