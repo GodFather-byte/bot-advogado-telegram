@@ -37,6 +37,40 @@ export async function conectarBanco() {
   }
 }
 
+export async function getChatStats() {
+  if (mongoose.connection.readyState !== 1) {
+    return {
+      totalMessages: 0,
+      uniqueUsers: 0,
+      lastUserMessageAt: null,
+      available: false,
+    };
+  }
+
+  try {
+    const [totalMessages, uniqueUsers, lastUserMessage] = await Promise.all([
+      Message.countDocuments(),
+      Message.distinct('userId').then((ids) => ids.length),
+      Message.findOne({ role: 'user' }).sort({ createdAt: -1 }).lean(),
+    ]);
+
+    return {
+      totalMessages,
+      uniqueUsers,
+      lastUserMessageAt: lastUserMessage?.createdAt || null,
+      available: true,
+    };
+  } catch (error) {
+    console.error('[ERRO DB] Falha ao buscar estatísticas:', error.message);
+    return {
+      totalMessages: 0,
+      uniqueUsers: 0,
+      lastUserMessageAt: null,
+      available: false,
+    };
+  }
+}
+
 export const dbChat = {
   async saveMessage(userId, role, content) {
     if (mongoose.connection.readyState !== 1 || !content?.trim()) return;
@@ -76,6 +110,18 @@ export const dbChat = {
       return result.deletedCount > 0;
     } catch (error) {
       console.error('[ERRO DB] Falha ao limpar histórico:', error.message);
+      return false;
+    }
+  },
+
+  async clearAllHistory() {
+    if (mongoose.connection.readyState !== 1) return false;
+
+    try {
+      const result = await Message.deleteMany({});
+      return result.deletedCount > 0;
+    } catch (error) {
+      console.error('[ERRO DB] Falha ao limpar o histórico geral:', error.message);
       return false;
     }
   },

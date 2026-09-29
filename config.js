@@ -24,6 +24,8 @@ export const config = {
     .split(',')
     .map((id) => id.trim())
     .filter(Boolean),
+  adminPanelKey: process.env.ADMIN_PANEL_KEY || '',
+  publicUrl: process.env.PUBLIC_URL || 'http://localhost:3000',
   rateLimitPerMinute: Number(process.env.RATE_LIMIT_PER_MINUTE || 10),
   rateLimitWindowMs: Number(process.env.RATE_LIMIT_WINDOW_MS || 60000),
   botName: process.env.BOT_NAME || 'Assistente Jurídico',

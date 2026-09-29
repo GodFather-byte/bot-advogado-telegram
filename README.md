@@ -4,16 +4,92 @@ import FormData from 'form-data';
 import { askGemini } from './gemini.js';
 import { lerPdfDoTelegram } from './pdf.js';
 import { criarDocx } from './word.js';
-import { conectarBanco, dbChat } from './database.js';
+import { conectarBanco, dbChat, getChatStats } from './database.js';
 import { config, validateConfig } from './config.js';
 
 validateConfig();
 
 const app = express();
 app.use(express.json({ limit: '1mb' }));
+app.use(express.urlencoded({ extended: true }));
 
 const TELEGRAM_API = `https://api.telegram.org/bot${config.telegramBotToken}`;
 const rateLimitByUser = new Map();
+
+function renderAdminPage(stats) {
+  return `<!DOCTYPE html>
+  <html lang="pt-BR">
+    <head>
+      <meta charset="UTF-8" />
+      <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+      <title>Painel Administrativo | Bot Advogado</title>
+      <style>
+        body { font-family: Arial, sans-serif; background: #0f172a; color: #e2e8f0; margin: 0; padding: 40px; }
+        .container { max-width: 900px; margin: 0 auto; }
+        .card { background: #111827; border: 1px solid #334155; border-radius: 12px; padding: 20px; margin-bottom: 20px; }
+        h1 { margin-top: 0; }
+        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; }
+        .stat { background: #1e293b; border-radius: 10px; padding: 18px; }
+        .label { color: #94a3b8; font-size: 12px; text-transform: uppercase; }
+        .value { font-size: 28px; font-weight: bold; margin-top: 8px; }
+        button { background: #2563eb; color: white; border: none; border-radius: 8px; padding: 12px 18px; cursor: pointer; }
+        .muted { color: #94a3b8; }
+      </style>
+    </head>
+    <body>
+      <div class="container">
+        <div class="card">
+          <h1>📊 Painel Administrativo</h1>
+          <p class="muted">Bot: ${config.botName}</p>
+        </div>
+
+        <div class="grid">
+          <div class="stat">
+            <div class="label">Mensagens salvas</div>
+            <div class="value">${stats.totalMessages}</div>
+          </div>
+          <div class="stat">
+            <div class="label">Usuários distintos</div>
+            <div class="value">${stats.uniqueUsers}</div>
+          </div>
+          <div class="stat">
+            <div class="label">Última mensagem</div>
+            <div class="value">${stats.lastUserMessageAt ? new Date(stats.lastUserMessageAt).toLocaleString('pt-BR') : 'Sem dados'}</div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>⚙️ Configuração</h2>
+          <p>Admin IDs: ${config.adminUserIds.length ? config.adminUserIds.join(', ') : 'Nenhum usuário configurado'}</p>
+          <p>Taxa limite: ${config.rateLimitPerMinute} msg/min</p>
+          <p>URL pública: ${config.publicUrl}</p>
+        </div>
+
+        <div class="card">
+          <h2>🧹 Ações</h2>
+          <form method="POST" action="/admin/clear-history">
+            <button type="submit">Limpar todo o histórico de conversas</button>
+          </form>
+        </div>
+      </div>
+    </body>
+  </html>`;
+}
+
+function ensureAdminPanelAccess(req, res) {
+  if (!config.adminPanelKey) {
+    res.status(503).send('Painel administrativo desabilitado. Defina ADMIN_PANEL_KEY no ambiente.');
+    return false;
+  }
+
+  const providedKey = req.query.key || req.headers['x-admin-key'] || '';
+  if (providedKey !== config.adminPanelKey) {
+    res.status(401).send('Acesso negado. Informe a chave correta no parâmetro ?key=...');
+    return false;
+  }
+
+  return true;
+}
 
 async function sendMessage(chatId, text, options = {}) {
   const chunks = String(text || 'Não foi possível gerar uma resposta.').match(/[\s\S]{1,4000}/g) || [];
@@ -64,7 +140,7 @@ async function handleCommand(chatId, command, text) {
       return true;
 
     case '/help':
-      await sendMessage(chatId, '📚 Comandos disponíveis:\n/start — iniciar o atendimento\n/help — mostrar esta ajuda\n/status — verificar se o bot está online\n/sobre — informações e aviso legal\n/documentos — tipos de documentos que posso gerar\n/resetar — limpar o histórico desta conversa (somente admin)');
+      await sendMessage(chatId, '📚 Comandos disponíveis:\n/start — iniciar o atendimento\n/help — mostrar esta ajuda\n/status — verificar se o bot está online\n/sobre — informações e aviso legal\n/documentos — tipos de documentos que posso gerar\n/admin — painel administrativo (somente admin)\n/resetar — limpar o histórico desta conversa (somente admin)');
       return true;
 
     case '/status':
@@ -78,6 +154,22 @@ async function handleCommand(chatId, command, text) {
     case '/documentos':
       await sendMessage(chatId, '📄 Documentos que posso auxiliar a redigir:\n- Procuração\n- Contrato\n- Petição\n- Requerimento\n- Carta\n- Declaração\n- Termo de outorga\n\nBasta solicitar: "gere uma procuração" ou "quero um contrato".');
       return true;
+
+    case '/admin': {
+      if (!isAdmin(chatId)) {
+        await sendMessage(chatId, '⚠️ Este comando só pode ser usado por administradores do bot.');
+        return true;
+      }
+
+      if (!config.adminPanelKey) {
+        await sendMessage(chatId, '⚠️ O painel administrativo ainda não está ativo. Configure ADMIN_PANEL_KEY no ambiente.');
+        return true;
+      }
+
+      const adminUrl = `${config.publicUrl}/admin?key=${config.adminPanelKey}`;
+      await sendMessage(chatId, `📊 Painel administrativo disponível em: ${adminUrl}`);
+      return true;
+    }
 
     case '/resetar': {
       if (!isAdmin(chatId)) {
@@ -154,6 +246,25 @@ async function processUpdate(message) {
 
 app.get('/health', (_req, res) => {
   res.json({ status: 'ok', service: 'bot-advogado-telegram', timestamp: new Date().toISOString() });
+});
+
+app.get('/admin', async (req, res) => {
+  if (!ensureAdminPanelAccess(req, res)) return;
+  const stats = await getChatStats();
+  res.type('html').send(renderAdminPage(stats));
+});
+
+app.get('/admin/stats', async (req, res) => {
+  if (!ensureAdminPanelAccess(req, res)) return;
+  const stats = await getChatStats();
+  res.json(stats);
+});
+
+app.post('/admin/clear-history', async (req, res) => {
+  if (!ensureAdminPanelAccess(req, res)) return;
+
+  const cleared = await dbChat.clearAllHistory();
+  res.json({ cleared, message: cleared ? 'Histórico geral limpo com sucesso.' : 'Nada para limpar.' });
 });
 
 app.post('/webhook', (req, res) => {
