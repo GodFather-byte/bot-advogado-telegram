@@ -1,62 +1,39 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { dbChat } from './database.js';
+import dotenv from 'dotenv';
+dotenv.config();
 
-export async function askGemini(userId, userMessage, fileData = null) {
-  const history = dbChat.getHistory(userId);
-  
-  const dbLogText = fileData ? `[Arquivo anexado: ${fileData.mimeType}] ${userMessage}` : userMessage;
-  dbChat.saveMessage(userId, 'user', dbLogText);
+const systemInstruction = `Você é um assistente virtual jurídico de primeira linha, projetado para triagem de clientes de um escritório de advocacia.
+Seu tom deve ser altamente profissional, formal, empático e de extrema confiança.
+Forneça respostas completas e detalhadas, traduzindo o "juridiquês" para uma linguagem clara.
+Nunca prometa ganho de causa. Seu objetivo é entender o problema, explicar os direitos básicos envolvidos e preparar o agendamento com um advogado humano.`;
 
-  const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-  
-  const model = genAI.getGenerativeModel({
-    model: 'gemini-3.5-flash-lite',
-    systemInstruction: `Você é um Consultor Jurídico Sênior especialista no Sistema Jurídico Brasileiro.
-Seu objetivo é auxiliar advogados na análise de contratos, redação de peças processuais e pareceres técnicos a partir de texto, PDFs ou Áudios.
-- Ao receber ÁUDIO: atue ouvindo o relato de um colega. Extraia os fatos narrados na voz, identifique o direito e redija a peça ou parecer cabível.
-- Ao receber PDF: identifique ativamente cláusulas leoninas, nulidades, obscuridades e desequilíbrios contratuais.
-- Embasamento: justifique teses com base na legislação brasileira vigente (Código Civil, CDC, CLT, CPC) e jurisprudência pacificada (STJ/STF).
-- Mantenha rigor técnico, linguagem formal (juridiquês) e estrutura visual em tópicos claros.
-- REGRA DE EXPORTAÇÃO: Se o usuário pedir expressamente para enviar a resposta em "Word", "DOCX", "arquivo" ou "documento", você DEVE incluir a tag exata [GERAR_DOCX] no final da sua resposta. Se ele não pedir, não inclua a tag.`,
-    generationConfig: { temperature: 0.3 }
-  });
+export async function askGemini(userId, userMessage) {
+  // A busca agora ocorre no cluster do MongoDB Atlas
+  const history = await dbChat.getHistory(userId);
+  await dbChat.saveMessage(userId, 'user', userMessage);
 
-  const currentParts = [];
-  if (fileData) {
-    currentParts.push({
-      inlineData: {
-        data: fileData.base64,
-        mimeType: fileData.mimeType
-      }
+  try {
+    const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+    const model = genAI.getGenerativeModel({
+      model: 'gemini-1.5-flash',
+      systemInstruction: systemInstruction,
+      generationConfig: { temperature: 0.5 } // Temperatura menor para maior precisão jurídica
     });
-  }
-  
-  const textoFinal = userMessage.trim() !== "" ? userMessage : "Transcreva e elabore o parecer técnico/peça jurídica deste anexo.";
-  currentParts.push({ text: textoFinal });
 
-  const contents = [
-    ...history,
-    { role: 'user', parts: currentParts }
-  ];
+    const contents = [
+      ...history,
+      { role: 'user', parts: [{ text: userMessage }] }
+    ];
 
-  for (let attempt = 1; attempt <= 2; attempt++) {
-    try {
-      const response = await model.generateContent({ contents });
-      const replyText = response.response.text();
+    const response = await model.generateContent({ contents });
+    const replyText = response.response.text();
 
-      dbChat.saveMessage(userId, 'model', replyText);
-      return { success: true, text: replyText };
-
-    } catch (error) {
-      console.error(`[ALERTA GEMINI - TENTATIVA ${attempt}]`, error.message);
-      if (attempt === 1) {
-        await new Promise(resolve => setTimeout(resolve, 2500));
-      } else {
-        return { 
-          success: false, 
-          text: 'Doutor(a), os servidores de inteligência jurídica estão com alta demanda momentânea (Código 503). Por favor, reenvie a solicitação em 30 segundos.' 
-        };
-      }
-    }
+    await dbChat.saveMessage(userId, 'model', replyText);
+    return replyText;
+    
+  } catch (error) {
+    console.error('[ERRO GEMINI]', error);
+    return 'Compreendo a complexidade da sua solicitação, mas meus servidores estão passando por uma instabilidade momentânea. Poderia repetir sua mensagem em instantes?';
   }
 }
