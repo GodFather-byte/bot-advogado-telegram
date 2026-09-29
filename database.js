@@ -3,21 +3,29 @@ import { config } from './config.js';
 
 const messageSchema = new mongoose.Schema(
   {
-    userId: { type: String, required: true, index: true },
-    caseId: { type: mongoose.Schema.Types.ObjectId, ref: 'Case', index: true },
+    userId: { type: String, required: true },
+    caseId: { type: mongoose.Schema.Types.ObjectId, ref: 'Case' },
     role: { type: String, required: true, enum: ['user', 'model'] },
     content: { type: String, required: true, maxlength: 100000 },
   },
   { timestamps: true }
 );
 
+// Índices compostos cobrem as consultas de histórico (por usuário e,
+// opcionalmente, por caso) sem precisar de índices simples redundantes
+// no mesmo prefixo, reduzindo o custo de escrita.
+messageSchema.index({ userId: 1, createdAt: -1 });
+messageSchema.index({ userId: 1, caseId: 1, createdAt: -1 });
+
 const caseSchema = new mongoose.Schema(
   {
-    userId: { type: String, required: true, index: true },
+    userId: { type: String, required: true },
     title: { type: String, required: true, maxlength: 200 },
   },
   { timestamps: true }
 );
+
+caseSchema.index({ userId: 1, createdAt: 1 });
 
 const userCaseStateSchema = new mongoose.Schema(
   {
@@ -254,6 +262,22 @@ export const dbCases = {
     } catch (error) {
       console.error('[ERRO DB] Falha ao selecionar caso:', error.message);
       return null;
+    }
+  },
+
+  async deleteAllForUser(userId) {
+    if (mongoose.connection.readyState !== 1) return false;
+
+    try {
+      const [casesResult] = await Promise.all([
+        Case.deleteMany({ userId: String(userId) }),
+        UserCaseState.deleteOne({ userId: String(userId) }),
+      ]);
+
+      return casesResult.deletedCount > 0;
+    } catch (error) {
+      console.error('[ERRO DB] Falha ao remover casos do usuário:', error.message);
+      return false;
     }
   },
 };
