@@ -4,7 +4,6 @@ import { dbChat } from './database.js';
 export async function askGemini(userId, userMessage, fileData = null) {
   const history = dbChat.getHistory(userId);
   
-  // Registra no banco se houve anexo para dar contexto histórico à IA
   const dbLogText = fileData ? `[Arquivo anexado: ${fileData.mimeType}] ${userMessage}` : userMessage;
   dbChat.saveMessage(userId, 'user', dbLogText);
 
@@ -17,7 +16,8 @@ Seu objetivo é auxiliar advogados na análise de contratos, redação de peças
 - Ao receber ÁUDIO: atue ouvindo o relato de um colega. Extraia os fatos narrados na voz, identifique o direito e redija a peça ou parecer cabível.
 - Ao receber PDF: identifique ativamente cláusulas leoninas, nulidades, obscuridades e desequilíbrios contratuais.
 - Embasamento: justifique teses com base na legislação brasileira vigente (Código Civil, CDC, CLT, CPC) e jurisprudência pacificada (STJ/STF).
-- Mantenha rigor técnico, linguagem formal (juridiquês) e estrutura visual em tópicos claros.`,
+- Mantenha rigor técnico, linguagem formal (juridiquês) e estrutura visual em tópicos claros.
+- REGRA DE EXPORTAÇÃO: Se o usuário pedir expressamente para enviar a resposta em "Word", "DOCX", "arquivo" ou "documento", você DEVE incluir a tag exata [GERAR_DOCX] no final da sua resposta. Se ele não pedir, não inclua a tag.`,
     generationConfig: { temperature: 0.3 }
   });
 
@@ -39,7 +39,6 @@ Seu objetivo é auxiliar advogados na análise de contratos, redação de peças
     { role: 'user', parts: currentParts }
   ];
 
-  // Algoritmo de Retry: absorve picos temporários de 503 Service Unavailable do Google
   for (let attempt = 1; attempt <= 2; attempt++) {
     try {
       const response = await model.generateContent({ contents });
@@ -51,7 +50,6 @@ Seu objetivo é auxiliar advogados na análise de contratos, redação de peças
     } catch (error) {
       console.error(`[ALERTA GEMINI - TENTATIVA ${attempt}]`, error.message);
       if (attempt === 1) {
-        // Aguarda 2.5 segundos para a fila do Google aliviar
         await new Promise(resolve => setTimeout(resolve, 2500));
       } else {
         return { 
