@@ -1,0 +1,17 @@
+{
+  "name": "bot-advogado-telegram",
+  "version": "1.0.0",
+  "description": "Assistente Jurídico IA para análise de contratos e jurisprudência",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@google/generative-ai": "^0.21.0",
+    "axios": "^1.7.0",
+    "better-sqlite3": "^11.0.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2"
+  }
+}
