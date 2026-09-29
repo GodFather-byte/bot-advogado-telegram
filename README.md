@@ -90,8 +90,21 @@ Também compatível com:
 | `/status` | Verifica se bot está online |
 | `/sobre` | Informações sobre o bot |
 | `/documentos` | Tipos de documentos disponíveis |
+| `/novo_caso [título]` | Cria um novo caso e o torna ativo |
+| `/casos` | Lista os casos do usuário e destaca o ativo |
+| `/caso <número>` | Troca o caso ativo |
 | `/admin` | Acessa painel administrativo (admin) |
 | `/resetar` | Limpa histórico da conversa (admin) |
+
+## 🗂️ Histórico por Caso
+
+O bot permite organizar as conversas em "casos" independentes por usuário:
+
+- `/novo_caso [título]` cria um novo caso (com título opcional) e o define como ativo. Todas as mensagens seguintes ficam associadas a esse caso.
+- `/casos` lista os casos já criados, numerados, indicando qual está ativo no momento.
+- `/caso <número>` troca o caso ativo usando o número exibido em `/casos`.
+
+Cada caso mantém seu próprio histórico de mensagens enviado à IA, evitando que o contexto de assuntos diferentes se misture. Requer `MONGODB_URI` configurado; sem banco de dados, os comandos de caso informam que a funcionalidade está indisponível.
 
 ## 🏗️ Estrutura do Projeto
 

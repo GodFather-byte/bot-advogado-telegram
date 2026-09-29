@@ -9,13 +9,13 @@ Se o cliente enviar um PDF, analise o conteúdo com precisão e destaque limita�
 REGRA PARA GERAR DOCUMENTOS:
 Quando o usuário pedir uma procuração, contrato, petição ou outro documento, sua resposta DEVE começar exatamente com [GERAR_DOC]. Na linha seguinte, escreva o título e, depois, o conteúdo completo do documento.`;
 
-export async function askGemini(userId, userMessage) {
+export async function askGemini(userId, userMessage, caseId) {
   if (!config.geminiApiKey) {
     return '⚠️ O serviço de inteligência artificial ainda não foi configurado. Fale com o administrador do bot.';
   }
 
-  const history = await dbChat.getHistory(userId);
-  await dbChat.saveMessage(userId, 'user', userMessage);
+  const history = await dbChat.getHistory(userId, caseId);
+  await dbChat.saveMessage(userId, 'user', userMessage, caseId);
 
   try {
     const genAI = new GoogleGenerativeAI(config.geminiApiKey);
@@ -31,7 +31,7 @@ export async function askGemini(userId, userMessage) {
 
     if (!replyText) throw new Error('A IA retornou uma resposta vazia.');
 
-    await dbChat.saveMessage(userId, 'model', replyText);
+    await dbChat.saveMessage(userId, 'model', replyText, caseId);
     return replyText;
   } catch (error) {
     console.error('[ERRO GEMINI]', error.message);
