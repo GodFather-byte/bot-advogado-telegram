@@ -4,7 +4,7 @@ import FormData from 'form-data';
 import { askGemini } from './gemini.js';
 import { lerPdfDoTelegram } from './pdf.js';
 import { criarDocx } from './word.js';
-import { conectarBanco, dbChat, getChatStats } from './database.js';
+import { conectarBanco, dbChat, dbCases, getChatStats } from './database.js';
 import { config, validateConfig } from './config.js';
 
 validateConfig();
@@ -115,6 +115,10 @@ function getCommand(text) {
   return text?.trim().split(/\s+/)[0]?.toLowerCase().split('@')[0];
 }
 
+function getCommandArgs(text) {
+  return String(text || '').trim().split(/\s+/).slice(1).join(' ').trim();
+}
+
 function isRateLimited(chatId) {
   const now = Date.now();
   const entries = rateLimitByUser.get(String(chatId)) || [];
@@ -140,7 +144,7 @@ async function handleCommand(chatId, command, text) {
       return true;
 
     case '/help':
-      await sendMessage(chatId, '📚 Comandos disponíveis:\n/start — iniciar o atendimento\n/help — mostrar esta ajuda\n/status — verificar se o bot está online\n/sobre — informações do bot\n/documentos — tipos de documentos que posso ajudar\n/resetar — limpar seu histórico (admin)\n/admin — acessar painel (admin)');
+      await sendMessage(chatId, '📚 Comandos disponíveis:\n/start — iniciar o atendimento\n/help — mostrar esta ajuda\n/status — verificar se o bot está online\n/sobre — informações do bot\n/documentos — tipos de documentos que posso ajudar\n/novo_caso [título] — criar um novo caso e torná-lo ativo\n/casos — listar seus casos e ver qual está ativo\n/caso <número> — trocar o caso ativo\n/resetar — limpar seu histórico (admin)\n/admin — acessar painel (admin)');
       return true;
 
     case '/status':
@@ -181,6 +185,50 @@ async function handleCommand(chatId, command, text) {
       await sendMessage(chatId, cleared
         ? '🧹 Histórico desta conversa foi removido com sucesso.'
         : 'ℹ️ Nenhum histórico foi encontrado para limpar.');
+      return true;
+    }
+
+    case '/novo_caso': {
+      const titulo = getCommandArgs(text);
+      const novoCaso = await dbCases.createCase(chatId, titulo);
+
+      if (!novoCaso) {
+        await sendMessage(chatId, '⚠️ Não foi possível criar o caso agora. Verifique se o banco de dados está configurado (MONGODB_URI).');
+        return true;
+      }
+
+      await sendMessage(chatId, `🗂️ Novo caso criado: #${novoCaso.number} - ${novoCaso.title}\nEle já está ativo. Sua próxima conversa será registrada nele.`);
+      return true;
+    }
+
+    case '/casos': {
+      const casos = await dbCases.listCases(chatId);
+
+      if (!casos.length) {
+        await sendMessage(chatId, 'ℹ️ Você ainda não tem casos. Use /novo_caso para criar o primeiro.');
+        return true;
+      }
+
+      const lista = casos
+        .map((c) => `${c.number}. ${c.title}${c.isActive ? ' (ativo)' : ''}`)
+        .join('\n');
+      await sendMessage(chatId, `🗂️ Seus casos:\n${lista}\n\nUse /caso <número> para trocar de caso.`);
+      return true;
+    }
+
+    case '/caso': {
+      const arg = getCommandArgs(text);
+      const numero = Number.parseInt(arg, 10);
+
+      if (!arg || Number.isNaN(numero) || numero < 1) {
+        await sendMessage(chatId, 'ℹ️ Use /caso <número> informando o número do caso. Veja seus casos com /casos.');
+        return true;
+      }
+
+      const caso = await dbCases.setActiveCaseByNumber(chatId, numero);
+      await sendMessage(chatId, caso
+        ? `✅ Caso ativo alterado para #${caso.number} - ${caso.title}.`
+        : '⚠️ Caso não encontrado. Veja seus casos com /casos.');
       return true;
     }
 
@@ -226,7 +274,7 @@ async function processUpdate(message) {
     return;
   }
 
-  const reply = await askGemini(chatId, textoParaIA);
+  const reply = await askGemini(chatId, textoParaIA, (await dbCases.getActiveCase(chatId))?.id);
 
   if (reply.startsWith('[GERAR_DOC]')) {
     const lines = reply.split('\n');
