@@ -25,7 +25,6 @@ app.post('/webhook', async (req, res) => {
   let fileData = null;
 
   try {
-    // Detecta se foi enviado Documento (PDF) ou Mensagem de Voz (Áudio)
     const anexo = message.document || message.voice;
 
     if (anexo) {
@@ -39,11 +38,9 @@ app.post('/webhook', async (req, res) => {
 
         console.log(`[DOWNLOAD] Baixando ${logTipo} de ${chatId}...`);
         
-        // 1. Obtém a rota do arquivo nos servidores do Telegram
         const fileRes = await axios.get(`${TELEGRAM_API}/getFile?file_id=${fileId}`);
         const filePath = fileRes.data.result.file_path;
         
-        // 2. Baixa direto para a memória RAM (sem escrita em disco)
         const downloadUrl = `https://api.telegram.org/file/bot${process.env.TELEGRAM_BOT_TOKEN}/${filePath}`;
         const downloadRes = await axios.get(downloadUrl, { responseType: 'arraybuffer' });
         
@@ -66,8 +63,20 @@ app.post('/webhook', async (req, res) => {
     console.log(`[PROCESSANDO] Chat: ${chatId}`);
     const result = await askGemini(chatId, text, fileData);
 
-    // 3. Quebra em blocos de até 4000 caracteres e remove asteriscos conflitantes de Markdown
-    const chunks = result.text.match(/[\s\S]{1,4000}/g) || [];
+    if (!result.success) {
+        await axios.post(`${TELEGRAM_API}/sendMessage`, {
+            chat_id: chatId,
+            text: result.text
+        });
+        return;
+    }
+
+    // 1. Detecta a intenção de gerar documento e apaga a tag invisível
+    const wantsDocx = result.text.includes('[GERAR_DOCX]');
+    const rawText = result.text.replace(/\[GERAR_DOCX\]/g, '').trim();
+
+    // 2. Prepara o texto limpo (sem markdown conflitante)
+    const chunks = rawText.match(/[\s\S]{1,4000}/g) || [];
     let cleanReply = "";
     
     for (const chunk of chunks) {
@@ -80,17 +89,17 @@ app.post('/webhook', async (req, res) => {
       });
     }
 
-    // Se houve erro na IA, interrompe aqui para não criar documento vazio
-    if (!result.success) return;
+    // 3. Se não pediu o arquivo, a execução para tranquilamente por aqui!
+    if (!wantsDocx) return;
 
-    // 4. Constrói e envia o documento do Word (.docx) nativamente
+    // 4. Constrói e envia o documento do Word APENAS sob demanda
     console.log(`[GERANDO DOCX] Montando documento estruturado para ${chatId}...`);
     
     const doc = new Document({
       sections: [{
         properties: {},
         children: cleanReply.split('\n').map(line => new Paragraph({
-          children: [new TextRun({ text: line, size: 24 })] // Fonte tamanho 12 pt
+          children: [new TextRun({ text: line, size: 24 })]
         }))
       }]
     });
