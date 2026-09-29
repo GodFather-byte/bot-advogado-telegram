@@ -1,7 +1,7 @@
 {
   "name": "bot-juridico-pro",
-  "version": "3.0.0",
-  "description": "Sócio Digital Jurídico - MongoDB, RAG de PDF e Gerador de DOCX",
+  "version": "3.1.0",
+  "description": "Assistente jurídico para Telegram com Gemini, análise de PDF e geração de DOCX",
   "main": "index.js",
   "type": "module",
   "scripts": {

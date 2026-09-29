@@ -1,57 +1,70 @@
 import mongoose from 'mongoose';
-import dotenv from 'dotenv';
-dotenv.config();
+import { config } from './config.js';
 
-const conectarBanco = async () => {
-  try {
-    if (!process.env.MONGODB_URI) {
-      throw new Error("Variável MONGODB_URI ausente no Render.");
-    }
-    // O Mongoose gerencia automaticamente as quedas e reconexões de rede
-    await mongoose.connect(process.env.MONGODB_URI);
-    console.log('✅ MongoDB Atlas conectado. Memória de longo prazo operacional.');
-  } catch (error) {
-    console.error('❌ Falha na ignição do MongoDB:', error);
+const messageSchema = new mongoose.Schema(
+  {
+    userId: { type: String, required: true, index: true },
+    role: { type: String, required: true, enum: ['user', 'model'] },
+    content: { type: String, required: true, maxlength: 100000 },
+  },
+  { timestamps: true }
+);
+
+const Message = mongoose.models.Message || mongoose.model('Message', messageSchema);
+
+let connectionPromise;
+
+export async function conectarBanco() {
+  if (!config.mongodbUri) {
+    console.warn('⚠️ MONGODB_URI não configurada. O histórico ficará indisponível.');
+    return false;
   }
-};
 
-conectarBanco();
+  if (!connectionPromise) {
+    connectionPromise = mongoose.connect(config.mongodbUri, {
+      serverSelectionTimeoutMS: 10000,
+    });
+  }
 
-// Molde de blindagem: rejeita qualquer dado que fuja deste padrão
-const messageSchema = new mongoose.Schema({
-  userId: { type: String, required: true, index: true },
-  role: { type: String, required: true, enum: ['user', 'model'] },
-  content: { type: String, required: true },
-  timestamp: { type: Date, default: Date.now }
-});
-
-const Message = mongoose.model('Message', messageSchema);
+  try {
+    await connectionPromise;
+    console.log('✅ MongoDB Atlas conectado.');
+    return true;
+  } catch (error) {
+    connectionPromise = undefined;
+    console.error('❌ Falha ao conectar ao MongoDB:', error.message);
+    return false;
+  }
+}
 
 export const dbChat = {
   async saveMessage(userId, role, content) {
+    if (mongoose.connection.readyState !== 1 || !content?.trim()) return;
+
     try {
-      const novaMensagem = new Message({ userId, role, content });
-      await novaMensagem.save();
+      await Message.create({ userId: String(userId), role, content: content.trim() });
     } catch (error) {
-      console.error('[ERRO DB] Falha ao persistir mensagem:', error);
+      console.error('[ERRO DB] Falha ao persistir mensagem:', error.message);
     }
   },
 
-  async getHistory(userId, limit = 20) {
+  async getHistory(userId, limit = config.historyLimit) {
+    if (mongoose.connection.readyState !== 1) return [];
+
     try {
-      const mensagensDb = await Message.find({ userId })
-                                     .sort({ timestamp: -1 })
-                                     .limit(limit);
+      const safeLimit = Math.min(Math.max(Number(limit) || 20, 1), 50);
+      const messages = await Message.find({ userId: String(userId) })
+        .sort({ createdAt: -1 })
+        .limit(safeLimit)
+        .lean();
 
-      const mensagensOrdenadas = mensagensDb.reverse();
-
-      return mensagensOrdenadas.map(msg => ({
-        role: msg.role,
-        parts: [{ text: msg.content }]
+      return messages.reverse().map(({ role, content }) => ({
+        role,
+        parts: [{ text: content }],
       }));
     } catch (error) {
-      console.error('[ERRO DB] Falha na extração de histórico:', error);
+      console.error('[ERRO DB] Falha ao extrair histórico:', error.message);
       return [];
     }
-  }
+  },
 };

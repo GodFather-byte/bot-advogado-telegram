@@ -1,80 +1,138 @@
 import express from 'express';
 import axios from 'axios';
-import dotenv from 'dotenv';
-import FormData from 'form-data'; // Biblioteca para enviar arquivos via API
+import FormData from 'form-data';
 import { askGemini } from './gemini.js';
 import { lerPdfDoTelegram } from './pdf.js';
 import { criarDocx } from './word.js';
+import { conectarBanco } from './database.js';
+import { config, validateConfig } from './config.js';
 
-dotenv.config();
+validateConfig();
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: '1mb' }));
 
-const TELEGRAM_API = `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}`;
+const TELEGRAM_API = `https://api.telegram.org/bot${config.telegramBotToken}`;
+const MAX_TELEGRAM_MESSAGE_LENGTH = 4000;
 
-app.post('/webhook', async (req, res) => {
-  res.sendStatus(200);
+async function sendMessage(chatId, text, options = {}) {
+  const chunks = String(text || 'Não foi possível gerar uma resposta.').match(/[\s\S]{1,4000}/g) || [];
+  for (const chunk of chunks) {
+    await axios.post(`${TELEGRAM_API}/sendMessage`, {
+      chat_id: chatId,
+      text: chunk,
+      ...options,
+    }, { timeout: 15000 });
+  }
+}
 
-  const message = req.body?.message;
-  if (!message) return;
+function sanitizeFileName(name) {
+  return String(name || 'documento_juridico')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-zA-Z0-9_-]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 80) || 'documento_juridico';
+}
 
+function getCommand(text) {
+  return text?.trim().split(/\s+/)[0]?.toLowerCase().split('@')[0];
+}
+
+async function processUpdate(message) {
   const chatId = String(message.chat.id);
-  let textoParaIA = message.text || '';
+  const text = message.text?.trim() || '';
+  const command = getCommand(text);
 
-  // 1. O CLIENTE ENVIOU UM PDF?
-  if (message.document && message.document.mime_type === 'application/pdf') {
-    const fileId = message.document.file_id;
-    console.log(`[TRIAGEM] Lendo PDF do Chat: ${chatId}`);
-    
-    const pdfExtraido = await lerPdfDoTelegram(fileId, process.env.TELEGRAM_BOT_TOKEN);
-    
-    if (pdfExtraido) {
-      textoParaIA = `O usuário enviou um documento PDF com o seguinte conteúdo:\n\n${pdfExtraido}\n\nPor favor, responda à dúvida ou analise este documento. A dúvida do usuário foi: ${message.caption || 'Analise este documento.'}`;
-    } else {
-      return axios.post(`${TELEGRAM_API}/sendMessage`, { chat_id: chatId, text: "❌ Desculpe, não consegui ler este PDF." });
-    }
+  if (command === '/start') {
+    await sendMessage(chatId, '⚖️ Olá! Sou o assistente jurídico do bot. Envie sua dúvida, um PDF para análise ou use /help para ver os comandos.\n\nAviso: minhas respostas são informativas e não substituem um advogado.');
+    return;
   }
 
-  // Se não tem texto nem PDF, ignoramos
-  if (!textoParaIA) return;
+  if (command === '/help') {
+    await sendMessage(chatId, '📚 Comandos disponíveis:\n/start — iniciar o atendimento\n/help — mostrar esta ajuda\n/status — verificar se o bot está online\n/sobre — informações e aviso legal\n\nVocê também pode enviar uma dúvida ou um PDF.');
+    return;
+  }
 
-  console.log(`[TRIAGEM] Processando caso do Chat: ${chatId}`);
+  if (command === '/status') {
+    await sendMessage(chatId, '✅ Bot online e pronto para atender.');
+    return;
+  }
+
+  if (command === '/sobre') {
+    await sendMessage(chatId, '⚖️ Bot Advogado Telegram\nAssistente jurídico com análise de texto/PDF e geração de documentos.\n\nAs respostas são educacionais e não constituem consulta ou parecer jurídico.');
+    return;
+  }
+
+  let textoParaIA = text;
+
+  if (message.document) {
+    if (message.document.mime_type !== 'application/pdf') {
+      await sendMessage(chatId, '❌ No momento, consigo analisar apenas arquivos PDF.');
+      return;
+    }
+
+    await sendMessage(chatId, '⏳ Recebi o PDF. Vou analisar o conteúdo, aguarde um momento...');
+    const pdfExtraido = await lerPdfDoTelegram(message.document.file_id, config.telegramBotToken);
+    if (!pdfExtraido) {
+      await sendMessage(chatId, '❌ Não consegui ler este PDF. Verifique se ele não está protegido, corrompido ou baseado apenas em imagens.');
+      return;
+    }
+
+    textoParaIA = `O usuário enviou um documento PDF. Analise o conteúdo abaixo e responda à dúvida do usuário.\n\nCONTEÚDO DO PDF:\n${pdfExtraido}\n\nDÚVIDA DO USUÁRIO:\n${text || 'Faça um resumo dos pontos jurídicos mais importantes.'}`;
+  }
+
+  if (!textoParaIA) {
+    await sendMessage(chatId, 'Envie uma dúvida, um comando ou um arquivo PDF para começar. Use /help para ajuda.');
+    return;
+  }
+
   const reply = await askGemini(chatId, textoParaIA);
 
-  // 2. A IA MANDOU GERAR UM DOCUMENTO DOCX?
-  if (reply.includes('[GERAR_DOC]')) {
-    try {
-      const linhas = reply.split('\n');
-      const titulo = linhas[1] || 'Documento_Juridico';
-      // Junta o resto do texto tirando a tag e o título
-      const conteudoDoc = linhas.slice(2).join('\n').trim();
-
-      const docBuffer = await criarDocx(titulo, conteudoDoc);
-
-      // Monta o "pacote" do arquivo para enviar ao Telegram
-      const form = new FormData();
-      form.append('chat_id', chatId);
-      form.append('document', docBuffer, { filename: `${titulo.replace(/ /g, '_')}.docx` });
-      form.append('caption', '📄 Aqui está o documento redigido pela Inteligência Artificial.');
-
-      await axios.post(`${TELEGRAM_API}/sendDocument`, form, { headers: form.getHeaders() });
-    } catch (err) {
-      console.error('[ERRO DOCX]', err);
-      axios.post(`${TELEGRAM_API}/sendMessage`, { chat_id: chatId, text: "Ocorreu um erro ao gerar seu arquivo .docx." });
-    }
-  } 
-  // 3. SE FOR APENAS CONVERSA NORMAL
-  else {
-    try {
-      await axios.post(`${TELEGRAM_API}/sendMessage`, { chat_id: chatId, text: reply });
-    } catch (error) {
-      console.error('[ERRO TELEGRAM]', error.message);
-    }
+  if (reply.startsWith('[GERAR_DOC]')) {
+    const lines = reply.split('\n');
+    const titulo = lines[1]?.trim() || 'Documento Jurídico';
+    const conteudoDoc = lines.slice(2).join('\n').trim();
+    const docBuffer = await criarDocx(titulo, conteudoDoc);
+    const form = new FormData();
+    form.append('chat_id', chatId);
+    form.append('document', docBuffer, { filename: `${sanitizeFileName(titulo)}.docx` });
+    form.append('caption', '📄 Documento gerado. Revise o conteúdo com um advogado antes de utilizar.');
+    await axios.post(`${TELEGRAM_API}/sendDocument`, form, { headers: form.getHeaders(), timeout: 30000 });
+    return;
   }
+
+  await sendMessage(chatId, reply);
+}
+
+app.get('/health', (_req, res) => {
+  res.json({ status: 'ok', service: 'bot-advogado-telegram', timestamp: new Date().toISOString() });
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`⚖️ Servidor Jurídico ativo na porta ${PORT}`);
+app.post('/webhook', (req, res) => {
+  res.sendStatus(200);
+  const message = req.body?.message;
+  if (!message?.chat?.id) return;
+
+  processUpdate(message).catch(async (error) => {
+    console.error('[ERRO UPDATE]', error.message);
+    try {
+      await sendMessage(String(message.chat.id), '⚠️ Ocorreu um erro ao processar sua solicitação. Tente novamente em instantes.');
+    } catch (sendError) {
+      console.error('[ERRO TELEGRAM]', sendError.message);
+    }
+  });
 });
+
+const server = app.listen(config.port, async () => {
+  console.log(`⚖️ Servidor Jurídico ativo na porta ${config.port}`);
+  await conectarBanco();
+});
+
+function shutdown(signal) {
+  console.log(`Recebido ${signal}. Encerrando servidor...`);
+  server.close(() => process.exit(0));
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
