@@ -1,7 +1,7 @@
 {
   "name": "bot-advogado-telegram",
   "version": "1.0.0",
-  "description": "Assistente Jurídico IA (PDF, Áudio e Geração DOCX)",
+  "description": "Assistente Jurídico IA de Alta Performance (PDF, Voz e Word)",
   "main": "index.js",
   "type": "module",
   "scripts": {
