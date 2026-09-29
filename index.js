@@ -6,6 +6,10 @@ import { lerPdfDoTelegram } from './pdf.js';
 import { criarDocx } from './word.js';
 import { conectarBanco, dbChat, dbCases, getChatStats } from './database.js';
 import { config, validateConfig } from './config.js';
+import { isValidWebhookSecret } from './lib/webhookAuth.js';
+import { createRateLimiter } from './lib/rateLimiter.js';
+import { createUpdateDeduplicator } from './lib/dedup.js';
+import { withRetry } from './lib/retry.js';
 
 validateConfig();
 
@@ -14,9 +18,24 @@ app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true }));
 
 const TELEGRAM_API = `https://api.telegram.org/bot${config.telegramBotToken}`;
-const rateLimitByUser = new Map();
 
-function renderAdminPage(stats) {
+const rateLimiter = createRateLimiter({
+  limit: config.rateLimitPerMinute,
+  windowMs: config.rateLimitWindowMs,
+});
+rateLimiter.start();
+
+const updateDeduplicator = createUpdateDeduplicator();
+
+function escapeHtmlAttribute(value) {
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function renderAdminPage(stats, adminKey) {
   return `<!DOCTYPE html>
   <html lang="pt-BR">
     <head>
@@ -67,7 +86,10 @@ function renderAdminPage(stats) {
 
         <div class="card">
           <h2>🧹 Ações</h2>
-          <form method="POST" action="/admin/clear-history">
+          <p class="muted">Ação destrutiva: remove permanentemente o histórico de conversas de todos os usuários. Digite <strong>CONFIRMAR</strong> para habilitar.</p>
+          <form method="POST" action="/admin/clear-history" onsubmit="return confirm('Tem certeza? Esta ação apaga TODO o histórico e não pode ser desfeita.');">
+            ${adminKey ? `<input type="hidden" name="key" value="${adminKey}" />` : ''}
+            <input type="text" name="confirm" placeholder="Digite CONFIRMAR" required style="margin-right: 10px; padding: 8px; border-radius: 6px; border: 1px solid #334155; background: #0f172a; color: #e2e8f0;" />
             <button type="submit">Limpar todo o histórico de conversas</button>
           </form>
         </div>
@@ -76,15 +98,27 @@ function renderAdminPage(stats) {
   </html>`;
 }
 
+function getProvidedAdminKey(req) {
+  const headerKey = req.headers['x-admin-key'];
+  const queryKey = req.query.key;
+  const bodyKey = req.body?.key;
+
+  if (!headerKey && (queryKey || bodyKey)) {
+    console.warn('[ADMIN] Chave recebida via query/body. Prefira o header x-admin-key para evitar exposição em logs/histórico do navegador.');
+  }
+
+  return headerKey || queryKey || bodyKey || '';
+}
+
 function ensureAdminPanelAccess(req, res) {
   if (!config.adminPanelKey) {
     res.status(503).send('Painel administrativo desabilitado. Defina ADMIN_PANEL_KEY no ambiente.');
     return false;
   }
 
-  const providedKey = req.query.key || req.headers['x-admin-key'] || '';
+  const providedKey = getProvidedAdminKey(req);
   if (providedKey !== config.adminPanelKey) {
-    res.status(401).send('Acesso negado. Informe a chave correta no parâmetro ?key=...');
+    res.status(401).send('Acesso negado. Informe a chave correta via header x-admin-key (recomendado) ou no parâmetro ?key=... (compatibilidade).');
     return false;
   }
 
@@ -94,11 +128,35 @@ function ensureAdminPanelAccess(req, res) {
 async function sendMessage(chatId, text, options = {}) {
   const chunks = String(text || 'Não foi possível gerar uma resposta.').match(/[\s\S]{1,4000}/g) || [];
   for (const chunk of chunks) {
-    await axios.post(`${TELEGRAM_API}/sendMessage`, {
+    await withRetry(() => axios.post(`${TELEGRAM_API}/sendMessage`, {
       chat_id: chatId,
       text: chunk,
       ...options,
-    }, { timeout: 15000 });
+    }, { timeout: 15000 }), { retries: 1, baseDelayMs: 400 });
+  }
+}
+
+async function sendChatAction(chatId, action = 'typing') {
+  try {
+    await withRetry(() => axios.post(`${TELEGRAM_API}/sendChatAction`, {
+      chat_id: chatId,
+      action,
+    }, { timeout: 8000 }), { retries: 1, baseDelayMs: 300 });
+  } catch (error) {
+    console.error('[ERRO TELEGRAM] Falha ao enviar indicador de digitação:', error.message);
+  }
+}
+
+async function withTypingIndicator(chatId, task) {
+  await sendChatAction(chatId, 'typing');
+  const interval = setInterval(() => {
+    sendChatAction(chatId, 'typing');
+  }, 4000);
+
+  try {
+    return await task();
+  } finally {
+    clearInterval(interval);
   }
 }
 
@@ -120,17 +178,7 @@ function getCommandArgs(text) {
 }
 
 function isRateLimited(chatId) {
-  const now = Date.now();
-  const entries = rateLimitByUser.get(String(chatId)) || [];
-  const filtered = entries.filter((timestamp) => now - timestamp < config.rateLimitWindowMs);
-
-  if (filtered.length >= config.rateLimitPerMinute) {
-    return true;
-  }
-
-  filtered.push(now);
-  rateLimitByUser.set(String(chatId), filtered);
-  return false;
+  return rateLimiter.isRateLimited(chatId);
 }
 
 function isAdmin(chatId) {
@@ -171,7 +219,7 @@ async function handleCommand(chatId, command, text) {
       }
 
       const adminUrl = `${config.publicUrl}/admin?key=${config.adminPanelKey}`;
-      await sendMessage(chatId, `📊 Painel administrativo disponível em: ${adminUrl}`);
+      await sendMessage(chatId, `📊 Painel administrativo disponível em: ${adminUrl}\n\n⚠️ Este link contém uma chave sensível — evite compartilhá-lo. Para chamadas de API (curl/Postman), prefira enviar a chave no header x-admin-key em vez da query string.`);
       return true;
     }
 
@@ -181,10 +229,15 @@ async function handleCommand(chatId, command, text) {
         return true;
       }
 
-      const cleared = await dbChat.clearHistory(chatId);
+      const [messagesCleared, casesCleared] = await Promise.all([
+        dbChat.clearHistory(chatId),
+        dbCases.deleteAllForUser(chatId),
+      ]);
+
+      const cleared = messagesCleared || casesCleared;
       await sendMessage(chatId, cleared
-        ? '🧹 Histórico desta conversa foi removido com sucesso.'
-        : 'ℹ️ Nenhum histórico foi encontrado para limpar.');
+        ? '🧹 Histórico de mensagens e casos desta conversa foram removidos com sucesso.'
+        : 'ℹ️ Nenhum dado foi encontrado para limpar.');
       return true;
     }
 
@@ -260,7 +313,7 @@ async function processUpdate(message) {
     }
 
     await sendMessage(chatId, '⏳ Recebi o PDF. Vou analisar o conteúdo, aguarde um momento...');
-    const pdfExtraido = await lerPdfDoTelegram(message.document.file_id, config.telegramBotToken);
+    const pdfExtraido = await withTypingIndicator(chatId, () => lerPdfDoTelegram(message.document.file_id, config.telegramBotToken));
     if (!pdfExtraido) {
       await sendMessage(chatId, '❌ Não consegui ler este PDF. Verifique se ele não está protegido, corrompido ou baseado apenas em imagens.');
       return;
@@ -274,7 +327,8 @@ async function processUpdate(message) {
     return;
   }
 
-  const reply = await askGemini(chatId, textoParaIA, (await dbCases.getActiveCase(chatId))?.id);
+  const activeCaseId = (await dbCases.getActiveCase(chatId))?.id;
+  const reply = await withTypingIndicator(chatId, () => askGemini(chatId, textoParaIA, activeCaseId));
 
   if (reply.startsWith('[GERAR_DOC]')) {
     const lines = reply.split('\n');
@@ -285,7 +339,7 @@ async function processUpdate(message) {
     form.append('chat_id', chatId);
     form.append('document', docBuffer, { filename: `${sanitizeFileName(titulo)}.docx` });
     form.append('caption', '📄 Documento gerado. Revise o conteúdo com um advogado antes de utilizar.');
-    await axios.post(`${TELEGRAM_API}/sendDocument`, form, { headers: form.getHeaders(), timeout: 30000 });
+    await withRetry(() => axios.post(`${TELEGRAM_API}/sendDocument`, form, { headers: form.getHeaders(), timeout: 30000 }), { retries: 1, baseDelayMs: 500 });
     return;
   }
 
@@ -299,7 +353,11 @@ app.get('/health', (_req, res) => {
 app.get('/admin', async (req, res) => {
   if (!ensureAdminPanelAccess(req, res)) return;
   const stats = await getChatStats();
-  res.type('html').send(renderAdminPage(stats));
+  // Só embutimos a chave no formulário quando ela já veio pela query string
+  // (necessário para o form HTML funcionar); acesso via header não expõe a
+  // chave de volta na página.
+  const adminKeyForForm = req.query.key ? escapeHtmlAttribute(String(req.query.key)) : '';
+  res.type('html').send(renderAdminPage(stats, adminKeyForForm));
 });
 
 app.get('/admin/stats', async (req, res) => {
@@ -311,13 +369,36 @@ app.get('/admin/stats', async (req, res) => {
 app.post('/admin/clear-history', async (req, res) => {
   if (!ensureAdminPanelAccess(req, res)) return;
 
+  if (req.body?.confirm !== 'CONFIRMAR') {
+    res.status(400).json({
+      cleared: false,
+      message: 'Confirmação obrigatória. Envie o campo confirm com o valor "CONFIRMAR" para prosseguir.',
+    });
+    return;
+  }
+
   const cleared = await dbChat.clearAllHistory();
   res.json({ cleared, message: cleared ? 'Histórico geral limpo com sucesso.' : 'Nada para limpar.' });
 });
 
 app.post('/webhook', (req, res) => {
+  const receivedSecret = req.headers['x-telegram-bot-api-secret-token'];
+
+  if (!isValidWebhookSecret(receivedSecret, config.telegramWebhookSecret)) {
+    res.sendStatus(401);
+    return;
+  }
+
   res.sendStatus(200);
-  const message = req.body?.message;
+
+  const update = req.body || {};
+  const { update_id: updateId } = update;
+
+  if (updateDeduplicator.isDuplicate(updateId)) {
+    return;
+  }
+
+  const message = update.message || update.edited_message;
   if (!message?.chat?.id) return;
 
   processUpdate(message).catch(async (error) => {
@@ -337,6 +418,7 @@ const server = app.listen(config.port, async () => {
 
 function shutdown(signal) {
   console.log(`Recebido ${signal}. Encerrando servidor...`);
+  rateLimiter.stop();
   server.close(() => process.exit(0));
 }
 

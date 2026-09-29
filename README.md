@@ -10,6 +10,9 @@ Bot de Telegram inteligente que oferece consulta jurídica assistida por IA, an�
 - 💾 **Histórico de Conversas**: Integração com MongoDB para persistência de dados
 - 🔐 **Painel Admin**: Gerenciar histórico e estatísticas via web interface
 - ⏱️ **Rate Limiting**: Proteção contra abuso de taxa de requisições
+- 🔒 **Webhook Seguro**: Validação de segredo do Telegram no endpoint `/webhook`
+- 🔁 **Deduplicação de Updates**: Evita processar o mesmo update do Telegram duas vezes
+- ⌨️ **Indicador de digitação**: Feedback "digitando..." durante análise de PDF/IA
 
 ## 📋 Pré-requisitos
 
@@ -45,7 +48,23 @@ PORT=3000
 PUBLIC_URL=https://seu-dominio.com
 ADMIN_PANEL_KEY=sua_chave_admin
 ADMIN_USER_IDS=123456789,987654321
+
+# RECOMENDADO EM PRODUÇÃO
+TELEGRAM_WEBHOOK_SECRET=uma_string_aleatoria_longa
 ```
+
+### 🔒 Configurando o segredo do webhook
+
+O Telegram permite registrar um `secret_token` ao configurar o webhook, que é reenviado no header `x-telegram-bot-api-secret-token` em toda chamada. Isso evita que terceiros chamem seu endpoint `/webhook` fingindo ser o Telegram.
+
+1. Gere um valor aleatório e defina em `TELEGRAM_WEBHOOK_SECRET` no `.env`.
+2. Registre o mesmo valor ao configurar o webhook:
+```bash
+curl -F "url=https://seu-dominio.com/webhook" \
+     -F "secret_token=uma_string_aleatoria_longa" \
+     https://api.telegram.org/bot<SEU_TOKEN>/setWebhook
+```
+3. Sem `TELEGRAM_WEBHOOK_SECRET` configurado, o bot mantém o modo de compatibilidade atual (sem validação do header). Com a variável definida, requisições sem o header correto recebem `401`.
 
 ## 🏃 Execução
 
@@ -94,7 +113,7 @@ Também compatível com:
 | `/casos` | Lista os casos do usuário e destaca o ativo |
 | `/caso <número>` | Troca o caso ativo |
 | `/admin` | Acessa painel administrativo (admin) |
-| `/resetar` | Limpa histórico da conversa (admin) |
+| `/resetar` | Limpa histórico e casos da conversa (admin) |
 
 ## 🗂️ Histórico por Caso
 
@@ -116,6 +135,9 @@ bot-advogado-telegram/
 ├── gemini.js             # 🤖 Integração com Google Gemini
 ├── pdf.js                # 📄 Processamento de PDFs
 ├── word.js               # 📝 Geração de documentos DOCX
+├── lib/                  # 🧩 Helpers reutilizáveis (webhook auth, rate limiter, dedup, retry)
+├── tests/                # 🧪 Testes automatizados (Vitest)
+├── .github/workflows/    # ⚙️ CI (GitHub Actions)
 ├── package.json          # 📦 Dependências
 └── README.md             # 📚 Este arquivo
 ```
@@ -124,27 +146,69 @@ bot-advogado-telegram/
 
 ### Públicos
 - `GET /health` - Status do serviço
-- `POST /webhook` - Webhook do Telegram
+- `POST /webhook` - Webhook do Telegram (valida `x-telegram-bot-api-secret-token` quando `TELEGRAM_WEBHOOK_SECRET` está configurado)
 
 ### Admin (requer `ADMIN_PANEL_KEY`)
-- `GET /admin?key=...` - Painel web
-- `GET /admin/stats?key=...` - Estatísticas JSON
-- `POST /admin/clear-history?key=...` - Limpar histórico global
+- `GET /admin` - Painel web
+- `GET /admin/stats` - Estatísticas JSON
+- `POST /admin/clear-history` - Limpar histórico global (requer confirmação, veja abaixo)
+
+Autenticação: envie a chave no header `x-admin-key: sua_chave_admin` (recomendado). O uso de `?key=...` na query string continua funcionando apenas por retrocompatibilidade e é registrado como aviso nos logs, pois URLs com chave podem ficar salvas em logs e no histórico do navegador.
+
+`POST /admin/clear-history` é uma ação destrutiva e exige o campo `confirm` com o valor exato `CONFIRMAR` no corpo da requisição, além da autenticação:
+```bash
+curl -X POST https://seu-dominio.com/admin/clear-history \
+     -H "x-admin-key: sua_chave_admin" \
+     -H "Content-Type: application/x-www-form-urlencoded" \
+     -d "confirm=CONFIRMAR"
+```
 
 ## 🛡️ Segurança
 
 - ✅ Validação de variáveis de ambiente obrigatórias
-- ✅ Rate limiting por usuário
-- ✅ Autenticação do painel admin via chave
+- ✅ Webhook protegido por segredo compartilhado (`TELEGRAM_WEBHOOK_SECRET`), com resposta `401` em caso de segredo inválido
+- ✅ Deduplicação de `update_id` do Telegram, evitando processamento duplicado
+- ✅ Rate limiting por usuário com limpeza periódica de usuários inativos (evita crescimento de memória)
+- ✅ Autenticação do painel admin via header `x-admin-key` (query string mantida só por compatibilidade)
+- ✅ Confirmação obrigatória para limpar todo o histórico via painel admin
 - ✅ Sanitização de nomes de arquivo
-- ✅ Tratamento de erros robusto
+- ✅ Retentativas com backoff curto para chamadas críticas ao Telegram e ao Gemini
+- ✅ Tratamento de erros robusto, sem expor segredos/tokens em logs
+
+## 🧪 Testes
+
+O projeto usa [Vitest](https://vitest.dev/) para testes automatizados leves e compatíveis com ESM.
+
+```bash
+npm test         # roda todos os testes uma vez
+npm run test:watch  # modo watch, útil durante o desenvolvimento
+```
+
+Os testes cobrem, entre outros pontos:
+- Validação do segredo do webhook (`lib/webhookAuth.js`)
+- Deduplicação de `update_id` (`lib/dedup.js`)
+- Rate limiting básico e limpeza de usuários inativos (`lib/rateLimiter.js`)
+- Retentativas com backoff (`lib/retry.js`)
+- Reset seguro de dados do usuário quando o MongoDB está indisponível (`database.js`)
+
+## 🔁 Deduplicação e limites
+
+- Cada update do Telegram traz um `update_id`; o bot mantém um cache em memória de curto prazo (TTL) desses IDs para não processar o mesmo update duas vezes em caso de reenvio pelo Telegram.
+- O webhook também aceita `edited_message`, processando-a como uma mensagem normal quando não há `message` no payload.
+- O rate limiter usa uma janela deslizante configurável (`RATE_LIMIT_PER_MINUTE` / `RATE_LIMIT_WINDOW_MS`) e limpa periodicamente entradas de usuários que pararam de enviar mensagens.
+
+## ⚙️ CI
+
+Um workflow do GitHub Actions (`.github/workflows/ci.yml`) roda os testes automaticamente em cada push/PR para `main`, nas versões Node 18.x e 20.x, com cache de dependências via `npm ci`.
 
 ## 📊 Monitoramento
 
-Acesse o painel administrativo:
+Acesse o painel administrativo enviando a chave via header (recomendado):
+```bash
+curl -H "x-admin-key: sua_chave_admin" https://seu-dominio.com/admin
 ```
-https://seu-dominio.com/admin?key=sua_chave_admin
-```
+
+Para navegação via browser, o acesso por query string (`?key=sua_chave_admin`) ainda é aceito por retrocompatibilidade, mas evite compartilhar esse link.
 
 Métricas disponíveis:
 - Total de mensagens salvas
