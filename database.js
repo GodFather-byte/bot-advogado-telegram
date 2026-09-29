@@ -1,38 +1,57 @@
-import Database from 'better-sqlite3';
+import mongoose from 'mongoose';
+import dotenv from 'dotenv';
+dotenv.config();
 
-const db = new Database('./conversas_juridicas.sqlite');
+const conectarBanco = async () => {
+  try {
+    if (!process.env.MONGODB_URI) {
+      throw new Error("Variável MONGODB_URI ausente no Render.");
+    }
+    // O Mongoose gerencia automaticamente as quedas e reconexões de rede
+    await mongoose.connect(process.env.MONGODB_URI);
+    console.log('✅ MongoDB Atlas conectado. Memória de longo prazo operacional.');
+  } catch (error) {
+    console.error('❌ Falha na ignição do MongoDB:', error);
+  }
+};
 
-// Ativa o Write-Ahead Logging (WAL) para leitura/escrita ultrarrápidas concorrentes
-db.pragma('journal_mode = WAL');
+conectarBanco();
 
-// Tabela de histórico de conversas
-db.exec(`
-  CREATE TABLE IF NOT EXISTS messages (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id TEXT NOT NULL,
-    role TEXT NOT NULL,
-    content TEXT NOT NULL
-  );
-`);
+// Molde de blindagem: rejeita qualquer dado que fuja deste padrão
+const messageSchema = new mongoose.Schema({
+  userId: { type: String, required: true, index: true },
+  role: { type: String, required: true, enum: ['user', 'model'] },
+  content: { type: String, required: true },
+  timestamp: { type: Date, default: Date.now }
+});
 
-// Prepared Statements estáticos para evitar desalocação de ponteiros C++ e crash no Node 24
-const insertStmt = db.prepare('INSERT INTO messages (user_id, role, content) VALUES (?, ?, ?)');
-const selectStmt = db.prepare(`
-  SELECT role, content FROM messages 
-  WHERE user_id = ? 
-  ORDER BY id DESC LIMIT ?
-`);
+const Message = mongoose.model('Message', messageSchema);
 
 export const dbChat = {
-  saveMessage(userId, role, content) {
-    insertStmt.run(userId, role, content);
+  async saveMessage(userId, role, content) {
+    try {
+      const novaMensagem = new Message({ userId, role, content });
+      await novaMensagem.save();
+    } catch (error) {
+      console.error('[ERRO DB] Falha ao persistir mensagem:', error);
+    }
   },
 
-  getHistory(userId, limit = 20) {
-    const rows = selectStmt.all(userId, limit);
-    return rows.reverse().map(row => ({
-      role: row.role,
-      parts: [{ text: row.content }]
-    }));
+  async getHistory(userId, limit = 20) {
+    try {
+      const mensagensDb = await Message.find({ userId })
+                                     .sort({ timestamp: -1 })
+                                     .limit(limit);
+
+      const mensagensOrdenadas = mensagensDb.reverse();
+
+      return mensagensOrdenadas.map(msg => ({
+        role: msg.role,
+        parts: [{ text: msg.content }]
+      }));
+    } catch (error) {
+      console.error('[ERRO DB] Falha na extração de histórico:', error);
+      return [];
+    }
   }
 };
