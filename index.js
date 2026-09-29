@@ -1,5 +1,7 @@
 import express from 'express';
 import axios from 'axios';
+import FormData from 'form-data';
+import { Document, Packer, Paragraph, TextRun } from 'docx';
 import { askGemini } from './gemini.js';
 
 if (!process.env.GEMINI_API_KEY || !process.env.TELEGRAM_BOT_TOKEN) {
@@ -19,58 +21,84 @@ app.post('/webhook', async (req, res) => {
   if (!message) return;
 
   const chatId = String(message.chat.id);
-  
-  // O usuário pode enviar apenas texto, ou um PDF com uma legenda (caption)
-  const text = message.text || message.caption || "Analise este documento jurídico.";
+  const text = message.text || message.caption || "";
   let fileData = null;
 
   try {
-    // 1. VERIFICA SE HÁ UM DOCUMENTO PDF NA MENSAGEM
-    if (message.document) {
-      const doc = message.document;
-      
-      if (doc.mime_type === 'application/pdf') {
-        console.log(`[DOWNLOAD] Baixando PDF de ${chatId}...`);
+    // Intercepta PDFs ou Mensagens de Voz (Áudio)
+    const anexo = message.document || message.voice;
+
+    if (anexo) {
+      const isPdf = anexo.mime_type === 'application/pdf';
+      const isAudio = Boolean(message.voice);
+
+      if (isPdf || isAudio) {
+        const fileId = anexo.file_id;
+        const mimeType = isAudio ? 'audio/ogg' : 'application/pdf';
+        const logTipo = isAudio ? 'ÁUDIO' : 'PDF';
+
+        console.log(`[DOWNLOAD] Baixando ${logTipo} de ${chatId}...`);
         
-        // Passo A: Pegar o caminho do arquivo nos servidores do Telegram
-        const fileRes = await axios.get(`${TELEGRAM_API}/getFile?file_id=${doc.file_id}`);
+        const fileRes = await axios.get(`${TELEGRAM_API}/getFile?file_id=${fileId}`);
         const filePath = fileRes.data.result.file_path;
         
-        // Passo B: Fazer o download do arquivo binário e converter para Base64
         const downloadUrl = `https://api.telegram.org/file/bot${process.env.TELEGRAM_BOT_TOKEN}/${filePath}`;
         const downloadRes = await axios.get(downloadUrl, { responseType: 'arraybuffer' });
         
         fileData = {
           base64: Buffer.from(downloadRes.data).toString('base64'),
-          mimeType: 'application/pdf'
+          mimeType: mimeType
         };
-        console.log('[DOWNLOAD] PDF pronto para análise!');
+        console.log(`[DOWNLOAD] ${logTipo} pronto para análise!`);
       } else {
-        // Se for uma imagem ou planilha, avisamos que o foco é PDF
         await axios.post(`${TELEGRAM_API}/sendMessage`, {
           chat_id: chatId,
-          text: "Doutor(a), no momento estou configurado para ler apenas arquivos em formato PDF."
+          text: "Doutor(a), no momento analiso apenas arquivos em formato PDF ou Mensagens de Voz."
         });
         return;
       }
     }
 
-    // Se não tiver texto nem arquivo, ignora
     if (!text && !fileData) return;
 
-    // 2. ENVIA PARA A IA (com ou sem arquivo)
-    console.log(`[ANALISANDO] Chat: ${chatId} | Prompt: "${text}"`);
+    console.log(`[ANALISANDO] Chat: ${chatId}`);
     const reply = await askGemini(chatId, text, fileData);
 
-    // 3. DEVOLVE A RESPOSTA (quebrando em blocos se for muito longa)
+    // 1. ENTREGA O TEXTO LIMPO NO CHAT (Resolvido o bug de formatação)
     const chunks = reply.match(/[\s\S]{1,4000}/g) || [];
+    let cleanReply = "";
+    
     for (const chunk of chunks) {
+      const cleanText = chunk.replace(/\*\*/g, '').replace(/\*/g, '');
+      cleanReply += cleanText + "\n";
+      
       await axios.post(`${TELEGRAM_API}/sendMessage`, {
         chat_id: chatId,
-        text: chunk,
-        parse_mode: 'Markdown'
+        text: cleanText
       });
     }
+
+    // 2. GERA E ENTREGA O ARQUIVO .DOCX
+    console.log(`[GERANDO DOCX] Criando arquivo Word para ${chatId}...`);
+    
+    const doc = new Document({
+      sections: [{
+        properties: {},
+        children: cleanReply.split('\n').map(line => new Paragraph({
+          children: [new TextRun({ text: line, size: 24 })] // size 24 equivale a fonte tamanho 12
+        }))
+      }]
+    });
+
+    const buffer = await Packer.toBuffer(doc);
+    const form = new FormData();
+    form.append('chat_id', chatId);
+    form.append('document', buffer, { filename: 'Parecer_Juridico.docx' });
+
+    await axios.post(`${TELEGRAM_API}/sendDocument`, form, {
+      headers: form.getHeaders()
+    });
+    console.log(`[SUCESSO] Arquivo Word enviado!`);
 
   } catch (error) {
     console.error('[ERRO SISTEMA]', error.response?.data || error.message);
