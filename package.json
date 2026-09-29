@@ -1,7 +1,7 @@
 {
   "name": "bot-juridico-pro",
-  "version": "2.0.0",
-  "description": "Sócio Digital Jurídico com Memória Persistente em MongoDB",
+  "version": "3.0.0",
+  "description": "Sócio Digital Jurídico - MongoDB, RAG de PDF e Gerador de DOCX",
   "main": "index.js",
   "type": "module",
   "scripts": {
@@ -12,6 +12,9 @@
     "axios": "^1.7.0",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
-    "mongoose": "^8.3.0"
+    "mongoose": "^8.3.0",
+    "pdf-parse": "^1.1.1",
+    "docx": "^8.5.0",
+    "form-data": "^4.0.0"
   }
 }
