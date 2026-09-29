@@ -1,296 +1,173 @@
-import express from 'express';
-import axios from 'axios';
-import FormData from 'form-data';
-import { askGemini } from './gemini.js';
-import { lerPdfDoTelegram } from './pdf.js';
-import { criarDocx } from './word.js';
-import { conectarBanco, dbChat, getChatStats } from './database.js';
-import { config, validateConfig } from './config.js';
+# ⚖️ Bot Advogado - Assistente Jurídico para Telegram
 
-validateConfig();
+Bot de Telegram inteligente que oferece consulta jurídica assistida por IA, análise de PDFs legais e geração de documentos personalizados.
 
-const app = express();
-app.use(express.json({ limit: '1mb' }));
-app.use(express.urlencoded({ extended: true }));
+## 🚀 Funcionalidades
 
-const TELEGRAM_API = `https://api.telegram.org/bot${config.telegramBotToken}`;
-const rateLimitByUser = new Map();
+- 💬 **Consulta Jurídica com IA**: Respostas baseadas em Gemini (Google)
+- 📄 **Análise de PDFs**: Envie documentos para análise e obtenha parecer automatizado
+- 📝 **Geração de Documentos**: Crie procurações, contratos, petições e mais em DOCX
+- 💾 **Histórico de Conversas**: Integração com MongoDB para persistência de dados
+- 🔐 **Painel Admin**: Gerenciar histórico e estatísticas via web interface
+- ⏱️ **Rate Limiting**: Proteção contra abuso de taxa de requisições
 
-function renderAdminPage(stats) {
-  return `<!DOCTYPE html>
-  <html lang="pt-BR">
-    <head>
-      <meta charset="UTF-8" />
-      <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-      <title>Painel Administrativo | Bot Advogado</title>
-      <style>
-        body { font-family: Arial, sans-serif; background: #0f172a; color: #e2e8f0; margin: 0; padding: 40px; }
-        .container { max-width: 900px; margin: 0 auto; }
-        .card { background: #111827; border: 1px solid #334155; border-radius: 12px; padding: 20px; margin-bottom: 20px; }
-        h1 { margin-top: 0; }
-        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; }
-        .stat { background: #1e293b; border-radius: 10px; padding: 18px; }
-        .label { color: #94a3b8; font-size: 12px; text-transform: uppercase; }
-        .value { font-size: 28px; font-weight: bold; margin-top: 8px; }
-        button { background: #2563eb; color: white; border: none; border-radius: 8px; padding: 12px 18px; cursor: pointer; }
-        .muted { color: #94a3b8; }
-      </style>
-    </head>
-    <body>
-      <div class="container">
-        <div class="card">
-          <h1>📊 Painel Administrativo</h1>
-          <p class="muted">Bot: ${config.botName}</p>
-        </div>
+## 📋 Pré-requisitos
 
-        <div class="grid">
-          <div class="stat">
-            <div class="label">Mensagens salvas</div>
-            <div class="value">${stats.totalMessages}</div>
-          </div>
-          <div class="stat">
-            <div class="label">Usuários distintos</div>
-            <div class="value">${stats.uniqueUsers}</div>
-          </div>
-          <div class="stat">
-            <div class="label">Última mensagem</div>
-            <div class="value">${stats.lastUserMessageAt ? new Date(stats.lastUserMessageAt).toLocaleString('pt-BR') : 'Sem dados'}</div>
-          </div>
-        </div>
+- Node.js 18+ 
+- Conta Telegram com Bot Token (via [@BotFather](https://t.me/botfather))
+- Chave API do Google Gemini
+- MongoDB Atlas (opcional, para histórico)
 
-        <div class="card">
-          <h2>⚙️ Configuração</h2>
-          <p>Admin IDs: ${config.adminUserIds.length ? config.adminUserIds.join(', ') : 'Nenhum usuário configurado'}</p>
-          <p>Taxa limite: ${config.rateLimitPerMinute} msg/min</p>
-          <p>URL pública: ${config.publicUrl}</p>
-        </div>
+## 🔧 Instalação
 
-        <div class="card">
-          <h2>🧹 Ações</h2>
-          <form method="POST" action="/admin/clear-history">
-            <button type="submit">Limpar todo o histórico de conversas</button>
-          </form>
-        </div>
-      </div>
-    </body>
-  </html>`;
-}
+1. Clone o repositório:
+```bash
+git clone https://github.com/GodFather-byte/bot-advogado-telegram.git
+cd bot-advogado-telegram
+```
 
-function ensureAdminPanelAccess(req, res) {
-  if (!config.adminPanelKey) {
-    res.status(503).send('Painel administrativo desabilitado. Defina ADMIN_PANEL_KEY no ambiente.');
-    return false;
-  }
+2. Instale as dependências:
+```bash
+yarn install
+# ou
+npm install
+```
 
-  const providedKey = req.query.key || req.headers['x-admin-key'] || '';
-  if (providedKey !== config.adminPanelKey) {
-    res.status(401).send('Acesso negado. Informe a chave correta no parâmetro ?key=...');
-    return false;
-  }
+3. Configure as variáveis de ambiente (crie um arquivo `.env`):
+```bash
+# OBRIGATÓRIO
+TELEGRAM_BOT_TOKEN=seu_token_aqui
 
-  return true;
-}
+# OPCIONAL
+GEMINI_API_KEY=sua_chave_gemini
+MONGODB_URI=seu_url_mongodb_atlas
+PORT=3000
+PUBLIC_URL=https://seu-dominio.com
+ADMIN_PANEL_KEY=sua_chave_admin
+ADMIN_USER_IDS=123456789,987654321
+```
 
-async function sendMessage(chatId, text, options = {}) {
-  const chunks = String(text || 'Não foi possível gerar uma resposta.').match(/[\s\S]{1,4000}/g) || [];
-  for (const chunk of chunks) {
-    await axios.post(`${TELEGRAM_API}/sendMessage`, {
-      chat_id: chatId,
-      text: chunk,
-      ...options,
-    }, { timeout: 15000 });
-  }
-}
+## 🏃 Execução
 
-function sanitizeFileName(name) {
-  return String(name || 'documento_juridico')
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/[^a-zA-Z0-9_-]+/g, '_')
-    .replace(/^_+|_+$/g, '')
-    .slice(0, 80) || 'documento_juridico';
-}
+Desenvolvimento local:
+```bash
+yarn start
+```
 
-function getCommand(text) {
-  return text?.trim().split(/\s+/)[0]?.toLowerCase().split('@')[0];
-}
+Produção (com PM2):
+```bash
+pm2 start index.js --name "bot-advogado"
+```
 
-function isRateLimited(chatId) {
-  const now = Date.now();
-  const entries = rateLimitByUser.get(String(chatId)) || [];
-  const filtered = entries.filter((timestamp) => now - timestamp < config.rateLimitWindowMs);
+## 🌐 Deployment
 
-  if (filtered.length >= config.rateLimitPerMinute) {
-    return true;
-  }
+### Render.com
 
-  filtered.push(now);
-  rateLimitByUser.set(String(chatId), filtered);
-  return false;
-}
+1. Connect seu repositório GitHub ao Render
+2. Configure as variáveis de ambiente no dashboard
+3. Defina o comando de build: `yarn install`
+4. Defina o comando de start: `node index.js`
+5. Deploy!
 
-function isAdmin(chatId) {
-  return config.adminUserIds.includes(String(chatId));
-}
+**Variáveis obrigatórias no Render:**
+- `TELEGRAM_BOT_TOKEN` ⚠️ Sem isso, o bot não iniciará
 
-async function handleCommand(chatId, command, text) {
-  switch (command) {
-    case '/start':
-      await sendMessage(chatId, `⚖️ Olá! Sou o ${config.botName}. Envie sua dúvida, um PDF para análise ou use /help para ver os comandos.\n\nAviso: as respostas são informativas e não substituem um advogado.`);
-      return true;
+### Outros Serviços
 
-    case '/help':
-      await sendMessage(chatId, '📚 Comandos disponíveis:\n/start — iniciar o atendimento\n/help — mostrar esta ajuda\n/status — verificar se o bot está online\n/sobre — informações e aviso legal\n/documentos — tipos de documentos que posso gerar\n/admin — painel administrativo (somente admin)\n/resetar — limpar o histórico desta conversa (somente admin)');
-      return true;
+Também compatível com:
+- Heroku
+- Railway
+- AWS EC2
+- DigitalOcean
+- Qualquer host com Node.js
 
-    case '/status':
-      await sendMessage(chatId, '✅ Bot online e pronto para atender.');
-      return true;
+## 📖 Comandos do Bot
 
-    case '/sobre':
-      await sendMessage(chatId, `⚖️ ${config.botName}\nAssistente jurídico com análise de texto/PDF e geração de documentos.\n\nAs respostas são educacionais e não constituem consulta ou parecer jurídico.`);
-      return true;
+| Comando | Descrição |
+|---------|-----------|
+| `/start` | Inicia o atendimento |
+| `/help` | Mostra lista de comandos |
+| `/status` | Verifica se bot está online |
+| `/sobre` | Informações sobre o bot |
+| `/documentos` | Tipos de documentos disponíveis |
+| `/admin` | Acessa painel administrativo (admin) |
+| `/resetar` | Limpa histórico da conversa (admin) |
 
-    case '/documentos':
-      await sendMessage(chatId, '📄 Documentos que posso auxiliar a redigir:\n- Procuração\n- Contrato\n- Petição\n- Requerimento\n- Carta\n- Declaração\n- Termo de outorga\n\nBasta solicitar: "gere uma procuração" ou "quero um contrato".');
-      return true;
+## 🏗️ Estrutura do Projeto
 
-    case '/admin': {
-      if (!isAdmin(chatId)) {
-        await sendMessage(chatId, '⚠️ Este comando só pode ser usado por administradores do bot.');
-        return true;
-      }
+```
+bot-advogado-telegram/
+├── index.js              # 🎯 Servidor Express + webhook Telegram
+├── config.js             # ⚙️ Configurações e variáveis de ambiente
+├── database.js           # 💾 Conexão MongoDB e persistência
+├── gemini.js             # 🤖 Integração com Google Gemini
+├── pdf.js                # 📄 Processamento de PDFs
+├── word.js               # 📝 Geração de documentos DOCX
+├── package.json          # 📦 Dependências
+└── README.md             # 📚 Este arquivo
+```
 
-      if (!config.adminPanelKey) {
-        await sendMessage(chatId, '⚠️ O painel administrativo ainda não está ativo. Configure ADMIN_PANEL_KEY no ambiente.');
-        return true;
-      }
+## 🔌 API Endpoints
 
-      const adminUrl = `${config.publicUrl}/admin?key=${config.adminPanelKey}`;
-      await sendMessage(chatId, `📊 Painel administrativo disponível em: ${adminUrl}`);
-      return true;
-    }
+### Públicos
+- `GET /health` - Status do serviço
+- `POST /webhook` - Webhook do Telegram
 
-    case '/resetar': {
-      if (!isAdmin(chatId)) {
-        await sendMessage(chatId, '⚠️ A limpeza do histórico está disponível apenas para administradores do bot.');
-        return true;
-      }
+### Admin (requer `ADMIN_PANEL_KEY`)
+- `GET /admin?key=...` - Painel web
+- `GET /admin/stats?key=...` - Estatísticas JSON
+- `POST /admin/clear-history?key=...` - Limpar histórico global
 
-      const cleared = await dbChat.clearHistory(chatId);
-      await sendMessage(chatId, cleared
-        ? '🧹 Histórico desta conversa foi removido com sucesso.'
-        : 'ℹ️ Nenhum histórico foi encontrado para limpar.');
-      return true;
-    }
+## 🛡️ Segurança
 
-    default:
-      return false;
-  }
-}
+- ✅ Validação de variáveis de ambiente obrigatórias
+- ✅ Rate limiting por usuário
+- ✅ Autenticação do painel admin via chave
+- ✅ Sanitização de nomes de arquivo
+- ✅ Tratamento de erros robusto
 
-async function processUpdate(message) {
-  const chatId = String(message.chat.id);
-  const incomingText = String(message.text || message.caption || '').trim();
-  const command = getCommand(incomingText);
+## 📊 Monitoramento
 
-  if (isRateLimited(chatId)) {
-    await sendMessage(chatId, '⏳ Você está enviando mensagens em excesso. Aguarde um momento antes de continuar.');
-    return;
-  }
+Acesse o painel administrativo:
+```
+https://seu-dominio.com/admin?key=sua_chave_admin
+```
 
-  if (command && await handleCommand(chatId, command, incomingText)) {
-    return;
-  }
+Métricas disponíveis:
+- Total de mensagens salvas
+- Usuários distintos
+- Última mensagem recebida
+- Configurações ativas
 
-  let textoParaIA = incomingText;
+## 🐛 Troubleshooting
 
-  if (message.document) {
-    if (message.document.mime_type !== 'application/pdf') {
-      await sendMessage(chatId, '❌ No momento, consigo analisar apenas arquivos PDF.');
-      return;
-    }
+### "Application exited early" no Render
+- Verifique se `TELEGRAM_BOT_TOKEN` está configurado
+- Verifique logs: `yarn start` localmente
+- Confirme se o repositório está com os arquivos corretos
 
-    await sendMessage(chatId, '⏳ Recebi o PDF. Vou analisar o conteúdo, aguarde um momento...');
-    const pdfExtraido = await lerPdfDoTelegram(message.document.file_id, config.telegramBotToken);
-    if (!pdfExtraido) {
-      await sendMessage(chatId, '❌ Não consegui ler este PDF. Verifique se ele não está protegido, corrompido ou baseado apenas em imagens.');
-      return;
-    }
+### Bot não responde no Telegram
+- Valide o `TELEGRAM_BOT_TOKEN`
+- Certifique-se de que `PUBLIC_URL` está configurado
+- Verifique se o webhook foi registrado: `GET https://api.telegram.org/bot{TOKEN}/getWebhookInfo`
 
-    textoParaIA = `O usuário enviou um documento PDF. Analise o conteúdo abaixo e responda à dúvida do usuário.\n\nCONTEÚDO DO PDF:\n${pdfExtraido}\n\nDÚVIDA DO USUÁRIO:\n${incomingText || 'Faça um resumo dos pontos jurídicos mais importantes.'}`;
-  }
+### Erro de conexão MongoDB
+- Valide a `MONGODB_URI`
+- Whitelist o IP do servidor na MongoDB Atlas
+- Verifique as credenciais de acesso
 
-  if (!textoParaIA) {
-    await sendMessage(chatId, 'Envie uma dúvida, um comando ou um arquivo PDF para começar. Use /help para ajuda.');
-    return;
-  }
+## 📝 Licença
 
-  const reply = await askGemini(chatId, textoParaIA);
+[Adicione sua licença aqui]
 
-  if (reply.startsWith('[GERAR_DOC]')) {
-    const lines = reply.split('\n');
-    const titulo = lines[1]?.trim() || 'Documento Jurídico';
-    const conteudoDoc = lines.slice(2).join('\n').trim();
-    const docBuffer = await criarDocx(titulo, conteudoDoc);
-    const form = new FormData();
-    form.append('chat_id', chatId);
-    form.append('document', docBuffer, { filename: `${sanitizeFileName(titulo)}.docx` });
-    form.append('caption', '📄 Documento gerado. Revise o conteúdo com um advogado antes de utilizar.');
-    await axios.post(`${TELEGRAM_API}/sendDocument`, form, { headers: form.getHeaders(), timeout: 30000 });
-    return;
-  }
+## 🤝 Contribuições
 
-  await sendMessage(chatId, reply);
-}
+Pull requests são bem-vindas! Para mudanças maiores, abra uma issue primeiro.
 
-app.get('/health', (_req, res) => {
-  res.json({ status: 'ok', service: 'bot-advogado-telegram', timestamp: new Date().toISOString() });
-});
+## 💬 Suporte
 
-app.get('/admin', async (req, res) => {
-  if (!ensureAdminPanelAccess(req, res)) return;
-  const stats = await getChatStats();
-  res.type('html').send(renderAdminPage(stats));
-});
+Encontrou um bug? [Abra uma issue](https://github.com/GodFather-byte/bot-advogado-telegram/issues)
 
-app.get('/admin/stats', async (req, res) => {
-  if (!ensureAdminPanelAccess(req, res)) return;
-  const stats = await getChatStats();
-  res.json(stats);
-});
+---
 
-app.post('/admin/clear-history', async (req, res) => {
-  if (!ensureAdminPanelAccess(req, res)) return;
-
-  const cleared = await dbChat.clearAllHistory();
-  res.json({ cleared, message: cleared ? 'Histórico geral limpo com sucesso.' : 'Nada para limpar.' });
-});
-
-app.post('/webhook', (req, res) => {
-  res.sendStatus(200);
-  const message = req.body?.message;
-  if (!message?.chat?.id) return;
-
-  processUpdate(message).catch(async (error) => {
-    console.error('[ERRO UPDATE]', error.message);
-    try {
-      await sendMessage(String(message.chat.id), '⚠️ Ocorreu um erro ao processar sua solicitação. Tente novamente em instantes.');
-    } catch (sendError) {
-      console.error('[ERRO TELEGRAM]', sendError.message);
-    }
-  });
-});
-
-const server = app.listen(config.port, async () => {
-  console.log(`⚖️ Servidor Jurídico ativo na porta ${config.port}`);
-  await conectarBanco();
-});
-
-function shutdown(signal) {
-  console.log(`Recebido ${signal}. Encerrando servidor...`);
-  server.close(() => process.exit(0));
-}
-
-process.on('SIGTERM', () => shutdown('SIGTERM'));
-process.on('SIGINT', () => shutdown('SIGINT'));
+**⚠️ Aviso Legal**: Este bot fornece informações educacionais e não substitui orientação de um advogado qualificado.
