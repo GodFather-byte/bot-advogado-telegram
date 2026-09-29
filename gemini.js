@@ -2,29 +2,25 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 import { dbChat } from './database.js';
 
 export async function askGemini(userId, userMessage, fileData = null) {
-  // 1. Busca o histórico de conversas anteriores do advogado
   const history = dbChat.getHistory(userId);
   
-  // 2. Salva a nova mensagem. Se houver arquivo, adiciona um marcador visual no banco de dados
-  const dbLogText = fileData ? `[Arquivo PDF anexado] ${userMessage}` : userMessage;
+  // O banco de dados agora registra se a IA recebeu um PDF ou um Áudio
+  const dbLogText = fileData ? `[Arquivo anexado: ${fileData.mimeType}] ${userMessage}` : userMessage;
   dbChat.saveMessage(userId, 'user', dbLogText);
 
   try {
     const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
     
-    // 3. Inicializa o modelo Lite para alta disponibilidade e custo zero
     const model = genAI.getGenerativeModel({
       model: 'gemini-3.5-flash-lite', 
       systemInstruction: `Você é um Consultor Jurídico Sênior especialista no Sistema Jurídico Brasileiro.
-Seu objetivo é auxiliar advogados na análise de contratos, peças processuais e PDFs em anexo.
-- Use linguagem culta, formal e técnica (juridiquês).
-- Ao analisar um PDF, procure ativamente por brechas, cláusulas abusivas ou contradições.
-- Baseie-se no Código Civil, CLT, Código Penal e Constituição Federal.
-- Estruture suas análises com tópicos claros para facilitar a leitura.`,
-      generationConfig: { temperature: 0.3 } // Mantém a resposta técnica, previsível e focada
+Seu objetivo é auxiliar advogados na análise de contratos e redação de peças processuais a partir de PDFs ou Áudios.
+- Ao receber um ÁUDIO: atue como um advogado brilhante ouvindo o relato de um colega. Extraia os fatos narrados na voz, identifique o direito e redija a peça solicitada.
+- Ao receber um PDF: analise ativamente em busca de brechas ou cláusulas abusivas.
+- Mantenha a linguagem estritamente formal, técnica (juridiquês) e justifique suas teses com o Código Civil, CLT, Código Penal ou jurisprudência.`,
+      generationConfig: { temperature: 0.3 }
     });
 
-    // 4. Monta o payload do turno atual. Se houver um PDF em Base64, ele é injetado aqui.
     const currentParts = [];
     if (fileData) {
       currentParts.push({
@@ -34,9 +30,11 @@ Seu objetivo é auxiliar advogados na análise de contratos, peças processuais 
         }
       });
     }
-    currentParts.push({ text: userMessage });
+    
+    // Se o usuário mandou apenas um áudio sem texto, injetamos uma instrução base
+    const textoFinal = userMessage.trim() !== "" ? userMessage : "Transcreva os fatos deste áudio e redija a peça correspondente.";
+    currentParts.push({ text: textoFinal });
 
-    // 5. Junta o histórico (passado) com a requisição multímodal (presente)
     const contents = [
       ...history,
       { role: 'user', parts: currentParts }
@@ -45,12 +43,11 @@ Seu objetivo é auxiliar advogados na análise de contratos, peças processuais 
     const response = await model.generateContent({ contents });
     const replyText = response.response.text();
 
-    // 6. Salva o parecer jurídico na memória do bot
     dbChat.saveMessage(userId, 'model', replyText);
     return replyText;
     
   } catch (error) {
     console.error('[ERRO GEMINI]', error);
-    return 'Doutor(a), houve uma falha ao processar a documentação. Por favor, tente enviar o arquivo novamente em alguns instantes.';
+    return 'Doutor(a), houve uma falha ao processar os dados. Por favor, tente enviar o arquivo ou áudio novamente.';
   }
 }
