@@ -5,7 +5,7 @@ import { Document, Packer, Paragraph, TextRun } from 'docx';
 import { askGemini } from './gemini.js';
 
 if (!process.env.GEMINI_API_KEY || !process.env.TELEGRAM_BOT_TOKEN) {
-  console.error('⚠️ Faltam variáveis de ambiente!');
+  console.error('⚠️ Faltam variáveis de ambiente (GEMINI_API_KEY ou TELEGRAM_BOT_TOKEN)!');
   process.exit(1);
 }
 
@@ -25,7 +25,7 @@ app.post('/webhook', async (req, res) => {
   let fileData = null;
 
   try {
-    // Intercepta PDFs ou Mensagens de Voz (Áudio)
+    // Detecta se foi enviado Documento (PDF) ou Mensagem de Voz (Áudio)
     const anexo = message.document || message.voice;
 
     if (anexo) {
@@ -39,9 +39,11 @@ app.post('/webhook', async (req, res) => {
 
         console.log(`[DOWNLOAD] Baixando ${logTipo} de ${chatId}...`);
         
+        // 1. Obtém a rota do arquivo nos servidores do Telegram
         const fileRes = await axios.get(`${TELEGRAM_API}/getFile?file_id=${fileId}`);
         const filePath = fileRes.data.result.file_path;
         
+        // 2. Baixa direto para a memória RAM (sem escrita em disco)
         const downloadUrl = `https://api.telegram.org/file/bot${process.env.TELEGRAM_BOT_TOKEN}/${filePath}`;
         const downloadRes = await axios.get(downloadUrl, { responseType: 'arraybuffer' });
         
@@ -49,11 +51,11 @@ app.post('/webhook', async (req, res) => {
           base64: Buffer.from(downloadRes.data).toString('base64'),
           mimeType: mimeType
         };
-        console.log(`[DOWNLOAD] ${logTipo} pronto para análise!`);
+        console.log(`[DOWNLOAD] ${logTipo} convertido para Base64 com sucesso!`);
       } else {
         await axios.post(`${TELEGRAM_API}/sendMessage`, {
           chat_id: chatId,
-          text: "Doutor(a), no momento analiso apenas arquivos em formato PDF ou Mensagens de Voz."
+          text: "Doutor(a), no momento estou habilitado para processar apenas arquivos PDF ou Mensagens de Áudio."
         });
         return;
       }
@@ -61,11 +63,11 @@ app.post('/webhook', async (req, res) => {
 
     if (!text && !fileData) return;
 
-    console.log(`[ANALISANDO] Chat: ${chatId}`);
-    const reply = await askGemini(chatId, text, fileData);
+    console.log(`[PROCESSANDO] Chat: ${chatId}`);
+    const result = await askGemini(chatId, text, fileData);
 
-    // 1. ENTREGA O TEXTO LIMPO NO CHAT (Resolvido o bug de formatação)
-    const chunks = reply.match(/[\s\S]{1,4000}/g) || [];
+    // 3. Quebra em blocos de até 4000 caracteres e remove asteriscos conflitantes de Markdown
+    const chunks = result.text.match(/[\s\S]{1,4000}/g) || [];
     let cleanReply = "";
     
     for (const chunk of chunks) {
@@ -78,14 +80,17 @@ app.post('/webhook', async (req, res) => {
       });
     }
 
-    // 2. GERA E ENTREGA O ARQUIVO .DOCX
-    console.log(`[GERANDO DOCX] Criando arquivo Word para ${chatId}...`);
+    // Se houve erro na IA, interrompe aqui para não criar documento vazio
+    if (!result.success) return;
+
+    // 4. Constrói e envia o documento do Word (.docx) nativamente
+    console.log(`[GERANDO DOCX] Montando documento estruturado para ${chatId}...`);
     
     const doc = new Document({
       sections: [{
         properties: {},
         children: cleanReply.split('\n').map(line => new Paragraph({
-          children: [new TextRun({ text: line, size: 24 })] // size 24 equivale a fonte tamanho 12
+          children: [new TextRun({ text: line, size: 24 })] // Fonte tamanho 12 pt
         }))
       }]
     });
@@ -98,14 +103,14 @@ app.post('/webhook', async (req, res) => {
     await axios.post(`${TELEGRAM_API}/sendDocument`, form, {
       headers: form.getHeaders()
     });
-    console.log(`[SUCESSO] Arquivo Word enviado!`);
+    console.log(`[SUCESSO] Documento Word enviado para ${chatId}!`);
 
   } catch (error) {
-    console.error('[ERRO SISTEMA]', error.response?.data || error.message);
+    console.error('[ERRO NO WEBHOOK]', error.response?.data || error.message);
   }
 });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`⚖️ Servidor Jurídico rodando na porta ${PORT}`);
+  console.log(`⚖️ Servidor Jurídico de Alta Performance ativo na porta ${PORT}`);
 });
