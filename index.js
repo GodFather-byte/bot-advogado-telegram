@@ -1,15 +1,31 @@
 import express from 'express';
+import rateLimit from 'express-rate-limit';
 import axios from 'axios';
 import FormData from 'form-data';
 import { askGemini } from './gemini.js';
 import { lerPdfDoTelegram } from './pdf.js';
 import { criarDocx } from './word.js';
-import { conectarBanco, dbChat, dbCases, getChatStats } from './database.js';
+import {
+  conectarBanco,
+  dbChat,
+  dbCases,
+  dbUsers,
+  dbLawyers,
+  dbReferrals,
+  getChatStats,
+} from './database.js';
 import { config, validateConfig } from './config.js';
 import { isValidWebhookSecret } from './lib/webhookAuth.js';
 import { createRateLimiter } from './lib/rateLimiter.js';
 import { createUpdateDeduplicator } from './lib/dedup.js';
 import { withRetry } from './lib/retry.js';
+import { getSpecialization, parseSpecializations, SPECIALIZATIONS, isComplexLegalQuestion } from './lib/specializations.js';
+import {
+  createLawyerDashboardToken,
+  isValidBrazilianState,
+  parseOab,
+  verifyLawyerDashboardToken,
+} from './lib/lawyers.js';
 
 validateConfig();
 
@@ -25,7 +41,16 @@ const rateLimiter = createRateLimiter({
 });
 rateLimiter.start();
 
+const lawyerDashboardLimiter = rateLimit({
+  windowMs: config.rateLimitWindowMs,
+  limit: config.rateLimitPerMinute,
+  standardHeaders: 'draft-8',
+  legacyHeaders: false,
+  handler: (_req, res) => res.status(429).send('Muitas tentativas. Aguarde antes de tentar novamente.'),
+});
+
 const updateDeduplicator = createUpdateDeduplicator();
+const lawyerRegistration = new Map();
 
 function escapeHtmlAttribute(value) {
   return String(value)
@@ -35,7 +60,7 @@ function escapeHtmlAttribute(value) {
     .replace(/>/g, '&gt;');
 }
 
-function renderAdminPage(stats, adminKey) {
+function renderAdminPage(stats, adminKey, lawyers) {
   return `<!DOCTYPE html>
   <html lang="pt-BR">
     <head>
@@ -85,6 +110,26 @@ function renderAdminPage(stats, adminKey) {
         </div>
 
         <div class="card">
+          <h2>⚖️ Verificação de advogados</h2>
+          ${lawyers.length ? lawyers.map((lawyer) => `
+            <div style="border-top: 1px solid #334155; padding: 14px 0">
+              <strong>${escapeHtmlAttribute(lawyer.name)}</strong>
+              <span class="muted"> — OAB ${escapeHtmlAttribute(lawyer.oabNumber)}</span>
+              <p class="muted">${escapeHtmlAttribute(lawyer.specializations.join(', '))} · ${escapeHtmlAttribute(lawyer.location.city)}, ${escapeHtmlAttribute(lawyer.location.state)} · ${escapeHtmlAttribute(lawyer.status)}</p>
+              ${lawyer.status === 'pending_verification' ? `<form method="POST" action="/admin/lawyers/${lawyer._id}/status">
+                ${adminKey ? `<input type="hidden" name="key" value="${adminKey}" />` : ''}
+                <input type="hidden" name="status" value="verified" />
+                <button type="submit">Verificar OAB</button>
+              </form>` : ''}
+              ${lawyer.status === 'verified' ? `<form method="POST" action="/admin/lawyers/${lawyer._id}/status">
+                ${adminKey ? `<input type="hidden" name="key" value="${adminKey}" />` : ''}
+                <input type="hidden" name="status" value="active" />
+                <button type="submit">Ativar perfil</button>
+              </form>` : ''}
+            </div>`).join('') : '<p class="muted">Nenhum advogado aguardando verificação ou ativação.</p>'}
+        </div>
+
+        <div class="card">
           <h2>🧹 Ações</h2>
           <p class="muted">Ação destrutiva: remove permanentemente o histórico de conversas de todos os usuários. Digite <strong>CONFIRMAR</strong> para habilitar.</p>
           <form method="POST" action="/admin/clear-history" onsubmit="return confirm('Tem certeza? Esta ação apaga TODO o histórico e não pode ser desfeita.');">
@@ -98,6 +143,30 @@ function renderAdminPage(stats, adminKey) {
   </html>`;
 }
 
+function renderLawyerDashboard(data) {
+  const { lawyer, referrals, totalReferrals } = data;
+  const list = referrals.length
+    ? referrals.map((referral) => {
+      const contact = referral.userConsent
+        ? `${escapeHtmlAttribute(referral.contact?.name || 'Usuário')}${referral.contact?.telegramUsername ? ` · @${escapeHtmlAttribute(referral.contact.telegramUsername)}` : ''}`
+        : 'Contato não compartilhado (sem consentimento)';
+      return `<li><strong>${escapeHtmlAttribute(referral.specialization)}</strong> — ${escapeHtmlAttribute(referral.status)} — ${new Date(referral.createdAt).toLocaleDateString('pt-BR')}<br><span class="muted">${contact}</span>
+        ${referral.status !== 'converted' ? `<form method="POST" action="/admin/lawyer-dashboard/convert">
+          <input type="hidden" name="token" value="${escapeHtmlAttribute(data.token)}" />
+          <input type="hidden" name="referralId" value="${escapeHtmlAttribute(referral._id)}" />
+          <button type="submit">Marcar como convertida</button>
+        </form>` : ''}</li>`;
+    }).join('')
+    : '<li class="muted">Nenhuma indicação neste mês.</li>';
+
+  return `<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Painel do advogado</title>
+    <style>body{font-family:Arial,sans-serif;background:#0f172a;color:#e2e8f0;margin:0;padding:32px}.container{max-width:850px;margin:auto}.card{background:#111827;border:1px solid #334155;border-radius:12px;padding:20px;margin-bottom:18px}.muted{color:#94a3b8}button{background:#2563eb;color:white;border:0;border-radius:6px;padding:8px 12px;margin-top:8px}li{padding:12px 0;border-bottom:1px solid #334155}</style></head><body><main class="container">
+    <section class="card"><h1>⚖️ Painel do advogado</h1><p><strong>${escapeHtmlAttribute(lawyer.name)}</strong> · OAB ${escapeHtmlAttribute(lawyer.oabNumber)}</p>
+      <p>${escapeHtmlAttribute(lawyer.specializations.join(', '))}</p><p>${escapeHtmlAttribute(lawyer.location.city)}, ${escapeHtmlAttribute(lawyer.location.state)}</p><p>Status: ${escapeHtmlAttribute(lawyer.status)}</p></section>
+    <section class="card"><h2>Indicações</h2><p>Total: ${totalReferrals} · Recebidas neste mês: ${data.referralsThisMonth} · Contatadas/conversões: ${data.conversionAttempts}</p><ul>${list}</ul></section>
+    <section class="card"><h2>Contato</h2><p>${escapeHtmlAttribute(lawyer.phone)}${lawyer.telegramUsername ? ` · @${escapeHtmlAttribute(lawyer.telegramUsername)}` : ''}</p><p>${escapeHtmlAttribute(lawyer.bio)}</p><p class="muted">Dados de contato dos usuários aparecem somente após consentimento explícito.</p></section>
+  </main></body></html>`;
+}
 function getProvidedAdminKey(req) {
   const headerKey = req.headers['x-admin-key'];
   const queryKey = req.query.key;
@@ -185,14 +254,161 @@ function isAdmin(chatId) {
   return config.adminUserIds.includes(String(chatId));
 }
 
-async function handleCommand(chatId, command, text) {
+function userDisplayName(from = {}) {
+  return [from.first_name, from.last_name].filter(Boolean).join(' ').slice(0, 120);
+}
+
+function parseLocation(text) {
+  const value = String(text || '').trim();
+  if (value.length > 105) return null;
+  const state = value.slice(0, 2);
+  const separator = value.charAt(2);
+  const city = value.slice(3).trim();
+  if (!isValidBrazilianState(state) || ![',', ' ', '-'].includes(separator) || city.length < 2 || city.length > 100) return null;
+  return { state: state.toUpperCase(), city };
+}
+
+function parsePhone(text) {
+  const value = String(text || '').trim();
+  const digits = value.replace(/\D/g, '');
+  if (digits.length >= 10 && digits.length <= 11) return `+55${digits}`;
+  return digits.length <= 15 && digits.length >= 12 ? `+${digits}` : null;
+}
+
+async function sendLawyerRecommendations(chatId, userId, preferredState) {
+  const user = await dbUsers.getUser(userId);
+  const activeCase = await dbCases.getActiveCase(userId);
+  const specialization = user?.specialization || activeCase?.specialization;
+  if (!specialization) {
+    await sendMessage(chatId, 'ℹ️ Selecione sua área com /especialidade antes de buscar advogados.');
+    return;
+  }
+
+  const lawyers = await dbLawyers.findRecommendations(specialization, preferredState || user?.location?.state);
+  if (!lawyers.length) {
+    await sendMessage(chatId, `ℹ️ Ainda não há advogados ativos em ${getSpecialization(specialization)?.name || specialization}.`);
+    return;
+  }
+
+  const entries = [];
+  const keyboard = [];
+  for (const [index, lawyer] of lawyers.entries()) {
+    const referral = await dbReferrals.create(userId, lawyer._id, specialization);
+    if (!referral) continue;
+    entries.push(`${index + 1}️⃣ ${lawyer.name}\n📍 ${lawyer.location.city}, ${lawyer.location.state}\n⭐ ${getSpecialization(specialization)?.name || specialization}\n📞 ${lawyer.phone}\n💬 ${lawyer.bio}`);
+    keyboard.push([{ text: `Enviar mensagem · ${lawyer.name}`.slice(0, 64), callback_data: `referral_contact:${referral._id}` }]);
+  }
+
+  if (!keyboard.length) {
+    await sendMessage(chatId, '⚠️ Não foi possível registrar as indicações agora. Tente novamente mais tarde.');
+    return;
+  }
+  await sendMessage(chatId, `⚖️ ADVOGADOS RECOMENDADOS\n\n${entries.join('\n\n')}\n\nAo escolher, você poderá consentir ou não com o compartilhamento do seu contato.`, {
+    reply_markup: { inline_keyboard: keyboard },
+  });
+}
+
+async function continueLawyerRegistration(chatId, text, message) {
+  const registration = lawyerRegistration.get(String(chatId));
+  if (!registration) return false;
+  const value = String(text || '').trim();
+
+  switch (registration.step) {
+    case 'name':
+      if (value.length < 3 || value.length > 120) {
+        await sendMessage(chatId, 'Informe seu nome completo (3 a 120 caracteres).');
+        return true;
+      }
+      registration.profile.name = value;
+      registration.step = 'oab';
+      await sendMessage(chatId, 'Informe sua OAB com a UF, por exemplo SP123456:');
+      return true;
+    case 'oab': {
+      const oab = parseOab(value);
+      if (!oab) {
+        await sendMessage(chatId, 'Formato não reconhecido. Informe UF e número da OAB (ex.: SP123456).');
+        return true;
+      }
+      registration.profile.oabNumber = oab.number;
+      registration.profile.oabState = oab.state;
+      registration.step = 'specializations';
+      await sendMessage(chatId, `Informe as áreas separadas por vírgula (número ou código):\n${SPECIALIZATIONS.map((item, index) => `${index + 1}. ${item.name}`).join('\n')}`);
+      return true;
+    }
+    case 'specializations': {
+      const specializations = parseSpecializations(value);
+      if (!specializations.length) {
+        await sendMessage(chatId, 'Selecione ao menos uma especialidade usando os números ou códigos listados.');
+        return true;
+      }
+      registration.profile.specializations = specializations;
+      registration.step = 'location';
+      await sendMessage(chatId, 'Informe seu estado e cidade (ex.: SP, São Paulo):');
+      return true;
+    }
+    case 'location': {
+      const location = parseLocation(value);
+      if (!location) {
+        await sendMessage(chatId, 'Localização inválida. Informe uma UF brasileira e a cidade (ex.: RJ, Niterói).');
+        return true;
+      }
+      registration.profile.location = location;
+      registration.step = 'phone';
+      await sendMessage(chatId, 'Informe um telefone de contato com DDD:');
+      return true;
+    }
+    case 'phone': {
+      const phone = parsePhone(value);
+      if (!phone) {
+        await sendMessage(chatId, 'Telefone inválido. Informe entre 10 e 15 dígitos, incluindo DDI se aplicável.');
+        return true;
+      }
+      registration.profile.phone = phone;
+      registration.step = 'bio';
+      await sendMessage(chatId, 'Escreva uma breve descrição da sua experiência (até 500 caracteres):');
+      return true;
+    }
+    case 'bio':
+      if (value.length < 10 || value.length > 500) {
+        await sendMessage(chatId, 'A descrição deve ter entre 10 e 500 caracteres.');
+        return true;
+      }
+      registration.profile.bio = value;
+      registration.step = 'telegramUsername';
+      await sendMessage(chatId, 'Informe seu usuário do Telegram (ex.: @dra_maria) ou envie - para deixar em branco:');
+      return true;
+    case 'telegramUsername': {
+      const username = value === '-' ? '' : value.replace(/^@/, '');
+      if (username && !/^[A-Za-z0-9_]{5,32}$/.test(username)) {
+        await sendMessage(chatId, 'Usuário inválido. Informe um username de 5 a 32 caracteres ou envie -.');
+        return true;
+      }
+      const profile = {
+        ...registration.profile,
+        telegramId: String(chatId),
+        telegramUsername: username,
+      };
+      lawyerRegistration.delete(String(chatId));
+      const lawyer = await dbLawyers.register(profile);
+      await sendMessage(chatId, lawyer
+        ? `✅ Cadastro recebido. Seu perfil está como ${lawyer.status} e será revisado pela administração antes de aparecer nas recomendações.`
+        : '⚠️ Não foi possível concluir o cadastro. Verifique se já existe um perfil com esta conta ou tente novamente mais tarde.');
+      return true;
+    }
+    default:
+      lawyerRegistration.delete(String(chatId));
+      return false;
+  }
+}
+
+async function handleCommand(chatId, command, text, message = {}) {
   switch (command) {
     case '/start':
       await sendMessage(chatId, `⚖️ Olá! Sou o ${config.botName}. Envie sua dúvida, um PDF para análise ou use /help para ver os comandos.\n\nAviso: as respostas são informativas e não substituem orientação de um advogado.`);
       return true;
 
     case '/help':
-      await sendMessage(chatId, '📚 Comandos disponíveis:\n/start — iniciar o atendimento\n/help — mostrar esta ajuda\n/status — verificar se o bot está online\n/sobre — informações do bot\n/documentos — tipos de documentos que posso ajudar\n/novo_caso [título] — criar um novo caso e torná-lo ativo\n/casos — listar seus casos e ver qual está ativo\n/caso <número> — trocar o caso ativo\n/resetar — limpar seu histórico (admin)\n/admin — acessar painel (admin)');
+      await sendMessage(chatId, '📚 Comandos disponíveis:\n/start — iniciar o atendimento\n/help — mostrar esta ajuda\n/status — verificar se o bot está online\n/sobre — informações do bot\n/documentos — tipos de documentos que posso ajudar\n/especialidade — escolher sua área jurídica\n/minha_especialidade — ver sua área\n/minha_localizacao <UF, cidade> — informar localização para recomendações\n/advogados — ver advogados recomendados\n/novo_caso [título] — criar um novo caso e torná-lo ativo\n/casos — listar seus casos e ver qual está ativo\n/caso <número> — trocar o caso ativo\n/registrar_advogado — cadastrar-se como advogado\n/meu_perfil — ver perfil e estatísticas de advogado\n/editar_perfil <campo> <valor> — editar bio, telefone, cidade, estado ou Telegram\n/dashboard_advogado — abrir o painel de indicações\n/marcar_indicacao <id> convertida — registrar conversão manualmente\n/cancelar — cancelar um cadastro em andamento\n/resetar — limpar seu histórico (admin)\n/admin — acessar painel (admin)');
       return true;
 
     case '/status':
@@ -207,6 +423,139 @@ async function handleCommand(chatId, command, text) {
       await sendMessage(chatId, '📄 Documentos que posso auxiliar a redigir:\n- Procuração\n- Contrato\n- Petição\n- Requerimento\n- Carta\n- Declaração\n- Termo de outorga\n\nBasta solicitar! 📝');
       return true;
 
+    case '/especialidade': {
+      const selected = getSpecialization(getCommandArgs(text));
+      if (selected) {
+        const saved = await dbUsers.setSpecialization(chatId, selected.code, userDisplayName(message.from));
+        await sendMessage(chatId, saved
+          ? `✅ Sua especialidade agora é ${selected.name}. As próximas respostas e novos casos usarão esse contexto.`
+          : '⚠️ Não foi possível salvar sua especialidade. Verifique se o banco de dados está disponível.');
+        return true;
+      }
+      await sendMessage(chatId, `⚖️ Escolha sua área jurídica:\n${SPECIALIZATIONS.map((item, index) => `${index + 1}. ${item.icon} ${item.name} — ${item.description}`).join('\n')}`, {
+        reply_markup: {
+          inline_keyboard: SPECIALIZATIONS.map((item) => [{ text: `${item.icon} ${item.name}`, callback_data: `specialization:${item.code}` }]),
+        },
+      });
+      return true;
+    }
+
+    case '/minha_especialidade': {
+      const user = await dbUsers.getUser(chatId);
+      const activeCase = await dbCases.getActiveCase(chatId);
+      const selected = getSpecialization(user?.specialization || activeCase?.specialization);
+      await sendMessage(chatId, selected
+        ? `⚖️ Sua especialidade atual é ${selected.name}. Use /especialidade para alterá-la.`
+        : 'ℹ️ Você ainda não escolheu uma área. Use /especialidade para começar.');
+      return true;
+    }
+
+    case '/minha_localizacao': {
+      const location = parseLocation(getCommandArgs(text));
+      if (!location) {
+        await sendMessage(chatId, 'ℹ️ Use /minha_localizacao <UF, cidade>, por exemplo /minha_localizacao SP, São Paulo.');
+        return true;
+      }
+      const saved = await dbUsers.setLocation(chatId, location.state, location.city);
+      await sendMessage(chatId, saved
+        ? `📍 Localização salva: ${location.city}, ${location.state}.`
+        : '⚠️ Não foi possível salvar sua localização. Verifique o banco de dados.');
+      return true;
+    }
+
+    case '/advogados': {
+      const preferredState = getCommandArgs(text).toUpperCase();
+      if (preferredState && !isValidBrazilianState(preferredState)) {
+        await sendMessage(chatId, 'ℹ️ Informe uma UF brasileira válida ou use /advogados sem parâmetro.');
+        return true;
+      }
+      await sendLawyerRecommendations(chatId, String(chatId), preferredState);
+      return true;
+    }
+
+    case '/registrar_advogado': {
+      if (message.chat?.type !== 'private') {
+        await sendMessage(chatId, 'Por segurança, o cadastro de advogado só pode ser feito em conversa privada com o bot.');
+        return true;
+      }
+      const existing = await dbLawyers.getByTelegramId(chatId);
+      if (existing) {
+        await sendMessage(chatId, `ℹ️ Já existe um perfil associado à sua conta (status: ${existing.status}). Use /meu_perfil para consultá-lo.`);
+        return true;
+      }
+      lawyerRegistration.set(String(chatId), { step: 'name', profile: {} });
+      await sendMessage(chatId, '⚖️ Cadastro de advogado iniciado. Envie seu nome completo. Use /cancelar para interromper.');
+      return true;
+    }
+
+    case '/cancelar':
+      if (lawyerRegistration.delete(String(chatId))) {
+        await sendMessage(chatId, 'Cadastro de advogado cancelado.');
+      } else {
+        await sendMessage(chatId, 'Não há fluxo de cadastro em andamento.');
+      }
+      return true;
+
+    case '/meu_perfil': {
+      const data = await dbLawyers.getDashboardData(chatId);
+      if (!data) {
+        await sendMessage(chatId, 'ℹ️ Nenhum perfil de advogado encontrado. Use /registrar_advogado para se cadastrar.');
+        return true;
+      }
+      await sendMessage(chatId, `⚖️ ${data.lawyer.name}\nOAB: ${data.lawyer.oabNumber}\nEspecialidades: ${data.lawyer.specializations.map((code) => getSpecialization(code)?.name || code).join(', ')}\nLocalização: ${data.lawyer.location.city}, ${data.lawyer.location.state}\nTelefone: ${data.lawyer.phone}\nTelegram: ${data.lawyer.telegramUsername ? `@${data.lawyer.telegramUsername}` : 'não informado'}\nBio: ${data.lawyer.bio}\nStatus: ${data.lawyer.status}\nIndicações recebidas: ${data.totalReferrals}\nContatos pendentes: ${data.pendingContacts}\n\nUse /dashboard_advogado para abrir o painel.`);
+      return true;
+    }
+
+    case '/editar_perfil': {
+      const [field, ...valueParts] = getCommandArgs(text).split(/\s+/);
+      const value = valueParts.join(' ').trim();
+      const lawyer = await dbLawyers.getByTelegramId(chatId);
+      if (!lawyer) {
+        await sendMessage(chatId, 'ℹ️ Cadastre-se primeiro com /registrar_advogado.');
+        return true;
+      }
+      const updates = {};
+      if (field === 'bio' && value.length >= 10 && value.length <= 500) updates.bio = value;
+      else if (field === 'telefone' && parsePhone(value)) updates.phone = parsePhone(value);
+      else if (field === 'especialidades') {
+        const specializations = parseSpecializations(value);
+        if (specializations.length) updates.specializations = specializations;
+      }
+      else if (field === 'cidade' && value.length >= 2 && value.length <= 100) updates['location.city'] = value;
+      else if (field === 'estado' && isValidBrazilianState(value)) updates['location.state'] = value.toUpperCase();
+      else if (field === 'telegram') {
+        const username = value === '-' ? '' : value.replace(/^@/, '');
+        if (!username || /^[A-Za-z0-9_]{5,32}$/.test(username)) updates.telegramUsername = username;
+      }
+      if (!Object.keys(updates).length) {
+        await sendMessage(chatId, 'ℹ️ Uso: /editar_perfil <bio|telefone|especialidades|cidade|estado|telegram> <novo valor>.');
+        return true;
+      }
+      const updated = await dbLawyers.updateProfile(chatId, updates);
+      await sendMessage(chatId, updated ? '✅ Perfil atualizado.' : '⚠️ Não foi possível atualizar o perfil.');
+      return true;
+    }
+
+    case '/dashboard_advogado': {
+      const lawyer = await dbLawyers.getByTelegramId(chatId);
+      if (!lawyer) {
+        await sendMessage(chatId, 'ℹ️ Cadastre-se primeiro com /registrar_advogado.');
+        return true;
+      }
+      const token = createLawyerDashboardToken(chatId, config.telegramBotToken);
+      await sendMessage(chatId, `🔐 Acesso temporário ao painel (válido por 15 minutos):\n${config.publicUrl}/admin/lawyer-dashboard?token=${encodeURIComponent(token)}`);
+      return true;
+    }
+
+    case '/marcar_indicacao': {
+      const [referralId, status] = getCommandArgs(text).split(/\s+/);
+      const updated = status === 'convertida' && await dbReferrals.markConverted(referralId, chatId);
+      await sendMessage(chatId, updated
+        ? '✅ Indicação marcada como convertida.'
+        : '⚠️ Não foi possível atualizar. Use /marcar_indicacao <id> convertida com o ID de uma indicação sua.');
+      return true;
+    }
+
     case '/admin': {
       if (!isAdmin(chatId)) {
         await sendMessage(chatId, '⚠️ Este comando só pode ser usado por administradores do bot.');
@@ -219,7 +568,7 @@ async function handleCommand(chatId, command, text) {
       }
 
       const adminUrl = `${config.publicUrl}/admin?key=${config.adminPanelKey}`;
-      await sendMessage(chatId, `📊 Painel administrativo disponível em: ${adminUrl}\n\n⚠️ Este link contém uma chave sensível — evite compartilhá-lo. Para chamadas de API (curl/Postman), prefira enviar a chave no header x-admin-key em vez da query string.`);
+      await sendMessage(chatId, `📊 Painel administrativo disponível em: ${adminUrl}\n\n⚠️ Este link contém uma chave sensível — evite compartilhá-lo. Para chamadas de API, prefira o header x-admin-key.`);
       return true;
     }
 
@@ -243,14 +592,15 @@ async function handleCommand(chatId, command, text) {
 
     case '/novo_caso': {
       const titulo = getCommandArgs(text);
-      const novoCaso = await dbCases.createCase(chatId, titulo);
+      const user = await dbUsers.getUser(chatId);
+      const novoCaso = await dbCases.createCase(chatId, titulo, user?.specialization);
 
       if (!novoCaso) {
         await sendMessage(chatId, '⚠️ Não foi possível criar o caso agora. Verifique se o banco de dados está configurado (MONGODB_URI).');
         return true;
       }
 
-      await sendMessage(chatId, `🗂️ Novo caso criado: #${novoCaso.number} - ${novoCaso.title}\nEle já está ativo. Sua próxima conversa será registrada nele.`);
+      await sendMessage(chatId, `🗂️ Novo caso criado: #${novoCaso.number} - ${novoCaso.title}${getSpecialization(novoCaso.specialization) ? `\nEspecialidade: ${getSpecialization(novoCaso.specialization).name}` : ''}\nEle já está ativo. Sua próxima conversa será registrada nele.`);
       return true;
     }
 
@@ -263,7 +613,7 @@ async function handleCommand(chatId, command, text) {
       }
 
       const lista = casos
-        .map((c) => `${c.number}. ${c.title}${c.isActive ? ' (ativo)' : ''}`)
+        .map((c) => `${c.number}. ${c.title}${getSpecialization(c.specialization) ? ` — ${getSpecialization(c.specialization).name}` : ''}${c.isActive ? ' (ativo)' : ''}`)
         .join('\n');
       await sendMessage(chatId, `🗂️ Seus casos:\n${lista}\n\nUse /caso <número> para trocar de caso.`);
       return true;
@@ -280,7 +630,7 @@ async function handleCommand(chatId, command, text) {
 
       const caso = await dbCases.setActiveCaseByNumber(chatId, numero);
       await sendMessage(chatId, caso
-        ? `✅ Caso ativo alterado para #${caso.number} - ${caso.title}.`
+        ? `✅ Caso ativo alterado para #${caso.number} - ${caso.title}${getSpecialization(caso.specialization) ? ` (${getSpecialization(caso.specialization).name})` : ''}.`
         : '⚠️ Caso não encontrado. Veja seus casos com /casos.');
       return true;
     }
@@ -300,9 +650,11 @@ async function processUpdate(message) {
     return;
   }
 
-  if (command && await handleCommand(chatId, command, incomingText)) {
+  if (command && await handleCommand(chatId, command, incomingText, message)) {
     return;
   }
+
+  if (lawyerRegistration.has(chatId) && await continueLawyerRegistration(chatId, incomingText, message)) return;
 
   let textoParaIA = incomingText;
 
@@ -327,8 +679,11 @@ async function processUpdate(message) {
     return;
   }
 
-  const activeCaseId = (await dbCases.getActiveCase(chatId))?.id;
-  const reply = await withTypingIndicator(chatId, () => askGemini(chatId, textoParaIA, activeCaseId));
+  const activeCase = await dbCases.getActiveCase(chatId);
+  const reply = await withTypingIndicator(
+    chatId,
+    () => askGemini(chatId, textoParaIA, activeCase?.id, activeCase?.specialization)
+  );
 
   if (reply.startsWith('[GERAR_DOC]')) {
     const lines = reply.split('\n');
@@ -344,6 +699,96 @@ async function processUpdate(message) {
   }
 
   await sendMessage(chatId, reply);
+  if (isComplexLegalQuestion(textoParaIA)) {
+    await sendLawyerRecommendations(chatId, chatId);
+  }
+}
+
+async function processCallbackQuery(callback) {
+  const chatId = String(callback.message?.chat?.id || '');
+  const userId = String(callback.from?.id || '');
+  if (!chatId || !userId || chatId !== userId || callback.message?.chat?.type !== 'private') {
+    await axios.post(`${TELEGRAM_API}/answerCallbackQuery`, { callback_query_id: callback.id }, { timeout: 8000 });
+    return;
+  }
+  await axios.post(`${TELEGRAM_API}/answerCallbackQuery`, { callback_query_id: callback.id }, { timeout: 8000 });
+
+  const [action, value] = String(callback.data || '').split(':');
+  if (action === 'specialization') {
+    const specialization = getSpecialization(value);
+    if (!specialization) return;
+    const saved = await dbUsers.setSpecialization(userId, specialization.code, userDisplayName(callback.from));
+    await sendMessage(chatId, saved
+      ? `✅ Sua especialidade agora é ${specialization.name}.`
+      : '⚠️ Não foi possível salvar sua especialidade.');
+    return;
+  }
+
+  if (action === 'referral_contact') {
+    const referral = await dbReferrals.getForUser(value, userId);
+    if (!referral || !['pending', 'contacted'].includes(referral.status) || referral.userConsent) {
+      await sendMessage(chatId, 'ℹ️ Esta indicação não está mais disponível.');
+      return;
+    }
+    const clicked = await dbReferrals.markContactClick(value, userId);
+    if (!clicked) {
+      await sendMessage(chatId, '⚠️ Não foi possível registrar seu clique. Tente novamente.');
+      return;
+    }
+    await sendMessage(chatId, '✅ Você permitirá que este advogado veja seu contato?\n\nSomente ao escolher “Sim” compartilharemos seu nome e usuário do Telegram.', {
+      reply_markup: {
+        inline_keyboard: [[
+          { text: 'Sim, conectar', callback_data: `referral_yes:${value}` },
+          { text: 'Não, obrigado', callback_data: `referral_no:${value}` },
+        ]],
+      },
+    });
+    return;
+  }
+
+  if (action === 'referral_no') {
+    const rejected = await dbReferrals.reject(value, userId);
+    await sendMessage(chatId, rejected ? 'Tudo bem. Seu contato não será compartilhado.' : 'ℹ️ Esta indicação não está mais disponível.');
+    return;
+  }
+
+  if (action === 'referral_yes') {
+    const existing = await dbReferrals.getForUser(value, userId);
+    if (!existing || (existing.status !== 'contacted' && !existing.userConsent)) {
+      await sendMessage(chatId, 'ℹ️ Esta indicação não está mais disponível.');
+      return;
+    }
+    if (existing.userConsent) {
+      await sendMessage(chatId, '✅ Seu contato já foi compartilhado com este advogado.');
+      return;
+    }
+    const contact = {
+      name: userDisplayName(callback.from) || 'Usuário do Telegram',
+      telegramUsername: callback.from.username || null,
+      telegramId: userId,
+    };
+    const referral = await dbReferrals.consentAndContact(value, userId, contact);
+    if (!referral) {
+      await sendMessage(chatId, 'ℹ️ Seu consentimento já foi registrado ou a indicação não está mais disponível.');
+      return;
+    }
+    const lawyer = await dbLawyers.getById(referral.lawyerId);
+    let lawyerNotified = false;
+    if (lawyer) {
+      const contactUrl = contact.telegramUsername
+        ? `https://t.me/${contact.telegramUsername}`
+        : `tg://user?id=${encodeURIComponent(userId)}`;
+      try {
+        await sendMessage(lawyer.telegramId, `📩 Um usuário aceitou compartilhar o contato após uma indicação de ${getSpecialization(referral.specialization)?.name || referral.specialization}.\nNome: ${contact.name}\nTelegram: ${contact.telegramUsername ? `@${contact.telegramUsername}` : contactUrl}\n\nRespeite o consentimento e utilize os dados somente para responder a esta solicitação.`);
+        lawyerNotified = true;
+      } catch (error) {
+        console.error('[ERRO TELEGRAM] Falha ao notificar advogado sobre indicação:', error.message);
+      }
+    }
+    await sendMessage(chatId, lawyerNotified
+      ? '✅ Conectamos você ao advogado. Seu nome e contato do Telegram foram compartilhados.'
+      : '✅ Seu consentimento foi registrado. Não foi possível avisar o advogado automaticamente; tente novamente mais tarde.');
+  }
 }
 
 app.get('/health', (_req, res) => {
@@ -352,12 +797,57 @@ app.get('/health', (_req, res) => {
 
 app.get('/admin', async (req, res) => {
   if (!ensureAdminPanelAccess(req, res)) return;
-  const stats = await getChatStats();
+  const [stats, lawyers] = await Promise.all([getChatStats(), dbLawyers.listForAdmin()]);
   // Só embutimos a chave no formulário quando ela já veio pela query string
   // (necessário para o form HTML funcionar); acesso via header não expõe a
   // chave de volta na página.
   const adminKeyForForm = req.query.key ? escapeHtmlAttribute(String(req.query.key)) : '';
-  res.type('html').send(renderAdminPage(stats, adminKeyForForm));
+  res.type('html').send(renderAdminPage(stats, adminKeyForForm, lawyers));
+});
+
+app.post('/admin/lawyers/:id/status', async (req, res) => {
+  if (!ensureAdminPanelAccess(req, res)) return;
+  const lawyer = await dbLawyers.setStatus(req.params.id, req.body?.status, req.ip);
+  if (!lawyer) {
+    res.status(400).send('Transição inválida ou advogado não encontrado.');
+    return;
+  }
+  res.type('html').send(`<!DOCTYPE html><html lang="pt-BR"><meta charset="UTF-8"><p>Perfil de ${escapeHtmlAttribute(lawyer.name)} atualizado para ${escapeHtmlAttribute(lawyer.status)}.</p><p><a href="/admin${req.body?.key ? `?key=${encodeURIComponent(req.body.key)}` : ''}">Voltar ao painel</a></p></html>`);
+});
+
+app.get('/admin/lawyer-dashboard', lawyerDashboardLimiter, async (req, res) => {
+  const telegramId = verifyLawyerDashboardToken(req.query.token, config.telegramBotToken);
+  if (!telegramId) {
+    res.status(401).send('Link inválido ou expirado. Solicite um novo link com /dashboard_advogado no Telegram.');
+    return;
+  }
+  const data = await dbLawyers.getDashboardData(telegramId);
+  if (!data) {
+    res.status(404).send('Perfil de advogado não encontrado.');
+    return;
+  }
+  data.token = String(req.query.token);
+  res.type('html').send(renderLawyerDashboard(data));
+});
+
+app.post('/admin/lawyer-dashboard/convert', lawyerDashboardLimiter, async (req, res) => {
+  const telegramId = verifyLawyerDashboardToken(req.body?.token, config.telegramBotToken);
+  if (!telegramId) {
+    res.status(401).send('Link inválido ou expirado. Solicite um novo link com /dashboard_advogado no Telegram.');
+    return;
+  }
+  const updated = await dbReferrals.markConverted(req.body?.referralId, telegramId);
+  if (!updated) {
+    res.status(400).send('Indicação inválida ou já atualizada.');
+    return;
+  }
+  const data = await dbLawyers.getDashboardData(telegramId);
+  if (!data) {
+    res.status(404).send('Perfil de advogado não encontrado.');
+    return;
+  }
+  data.token = String(req.body.token);
+  res.type('html').send(renderLawyerDashboard(data));
 });
 
 app.get('/admin/stats', async (req, res) => {
@@ -395,6 +885,13 @@ app.post('/webhook', (req, res) => {
   const { update_id: updateId } = update;
 
   if (updateDeduplicator.isDuplicate(updateId)) {
+    return;
+  }
+
+  if (update.callback_query) {
+    processCallbackQuery(update.callback_query).catch((error) => {
+      console.error('[ERRO CALLBACK]', error.message);
+    });
     return;
   }
 

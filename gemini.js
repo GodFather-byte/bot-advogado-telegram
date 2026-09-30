@@ -1,7 +1,8 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
-import { dbChat } from './database.js';
+import { dbChat, dbUsers } from './database.js';
 import { config } from './config.js';
 import { withRetry } from './lib/retry.js';
+import { getSpecializationPrompt } from './lib/specializations.js';
 
 const systemInstruction = `Você é um assistente virtual jurídico de primeira linha, em português do Brasil.
 Forneça informações educativas, explique conceitos com clareza e recomende a consulta a um advogado habilitado para decisões concretas. Não prometa resultados e não substitua aconselhamento jurídico profissional.
@@ -20,19 +21,23 @@ Ao final, inclua um aviso breve de que a resposta é educativa e não substitui 
 REGRA PARA GERAR DOCUMENTOS:
 Quando o usuário pedir uma procuração, contrato, petição ou outro documento, sua resposta DEVE começar exatamente com [GERAR_DOC]. Na linha seguinte, escreva o título e, depois, o conteúdo completo do documento.`;
 
-export async function askGemini(userId, userMessage, caseId) {
+export async function askGemini(userId, userMessage, caseId, caseSpecialization) {
   if (!config.geminiApiKey) {
     return '⚠️ O serviço de inteligência artificial ainda não foi configurado. Fale com o administrador do bot.';
   }
 
   const history = await dbChat.getHistory(userId, caseId);
   await dbChat.saveMessage(userId, 'user', userMessage, caseId);
+  const user = await dbUsers.getUser(userId);
+  const specialization = caseSpecialization || user?.specialization;
+  const contextualInstruction = systemInstruction
+    + getSpecializationPrompt(specialization, user?.location);
 
   try {
     const genAI = new GoogleGenerativeAI(config.geminiApiKey);
     const model = genAI.getGenerativeModel({
       model: config.geminiModel,
-      systemInstruction,
+      systemInstruction: contextualInstruction,
       generationConfig: { temperature: 0.5 },
     });
 
@@ -52,4 +57,3 @@ export async function askGemini(userId, userMessage, caseId) {
     return 'Meus servidores estão passando por instabilidade momentânea. Poderia repetir em instantes?';
   }
 }
-
