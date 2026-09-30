@@ -19,7 +19,7 @@ export const config = {
   geminiApiKey: process.env.GEMINI_API_KEY,
   // Modelo estável e amplamente disponível no SDK @google/generative-ai.
   // Ajuste via GEMINI_MODEL caso sua conta tenha acesso a outro modelo.
-  geminiModel: process.env.GEMINI_MODEL || 'gemini-1.5-flash',
+  geminiModel: process.env.GEMINI_MODEL || 'gemini-3.5-flash-lite',
   mongodbUri: process.env.MONGODB_URI,
   maxPdfCharacters: Number(process.env.MAX_PDF_CHARACTERS || 30000),
   historyLimit: Number(process.env.HISTORY_LIMIT || 20),
