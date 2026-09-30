@@ -1,16 +1,18 @@
-# ⚖️ Bot Advogado - Assistente Jurídico para Telegram
+# ⚖️ Bot Advogado - Assistente Jurídico (Telegram + Web)
 
-Bot de Telegram inteligente que oferece consulta jurídica assistida por IA, análise de PDFs legais e geração de documentos personalizados.
+Assistente jurídico com IA disponível tanto como **bot de Telegram** quanto como **aplicação web** (React + API REST), oferecendo consulta jurídica assistida por IA, análise de PDFs legais e geração de documentos personalizados.
 
 ## 🚀 Funcionalidades
 
-- 💬 **Consulta Jurídica com IA**: Respostas baseadas em Gemini (Google)
+- 💬 **Consulta Jurídica com IA**: Respostas baseadas em Gemini (Google), no Telegram e na web
 - ⚖️ **Especialização jurídica**: Contexto específico para sete áreas, associado ao usuário e ao caso ativo
 - 👩‍⚖️ **Rede de advogados**: Cadastro, análise administrativa, recomendações e acompanhamento de indicações, sem integração de pagamentos
-- 📄 **Análise de PDFs**: Envie documentos para análise e obtenha parecer automatizado
+- 📄 **Análise de PDFs**: Envie documentos para análise e obtenha parecer automatizado (Telegram ou upload web)
 - 📝 **Geração de Documentos**: Crie procurações, contratos, petições e mais em DOCX
 - 💾 **Histórico de Conversas**: Integração com MongoDB para persistência de dados
-- 🔐 **Painel Admin**: Gerenciar histórico e estatísticas via web interface
+- 🌐 **Portal Web (MVP)**: Frontend em React/Vite (`web/`) com login, chat, casos, upload de PDF e geração de documentos
+- 🔌 **API REST**: Endpoints `/api/*` reaproveitando toda a lógica existente do bot (gemini.js, pdf.js, word.js, database.js)
+- 🔐 **Painel Admin**: Gerenciar histórico e estatísticas via web interface (HTML legado) ou via API (`/api/admin/*`) consumida pelo painel React
 - ⏱️ **Rate Limiting**: Proteção contra abuso de taxa de requisições
 - 🔒 **Webhook Seguro**: Validação de segredo do Telegram no endpoint `/webhook`
 - 🔁 **Deduplicação de Updates**: Evita processar o mesmo update do Telegram duas vezes
@@ -70,15 +72,38 @@ curl -F "url=https://seu-dominio.com/webhook" \
 
 ## 🏃 Execução
 
+### Backend (bot + API REST)
+
 Desenvolvimento local:
 ```bash
 yarn start
+# ou
+npm start
 ```
+O servidor sobe em `http://localhost:3000` por padrão, expondo `/webhook`, `/health`, `/admin/*` (HTML legado) e `/api/*` (REST).
 
 Produção (com PM2):
 ```bash
 pm2 start index.js --name "bot-advogado"
 ```
+
+### Frontend web (MVP em React + Vite)
+
+O frontend fica em `web/` e consome a API REST do backend. Em desenvolvimento, o Vite faz proxy de `/api` para `http://localhost:3000` (configurável via `VITE_API_PROXY_TARGET`).
+
+```bash
+npm run web:install   # instala as dependências do frontend (uma vez)
+npm run web:dev        # inicia o Vite em http://localhost:5173
+```
+
+Com o backend rodando em outra aba/terminal (`npm start`), acesse `http://localhost:5173` para usar o portal web: criar conta, conversar com a IA, gerenciar casos, enviar PDFs e gerar documentos.
+
+Build de produção do frontend:
+```bash
+npm run web:build       # gera web/dist, que pode ser servido por qualquer host estático
+```
+
+Defina `WEB_APP_ORIGIN` no `.env` do backend com a origem do frontend (ex.: `http://localhost:5173` em dev, ou o domínio do site em produção) para liberar o CORS da API.
 
 ## 🌐 Deployment
 
@@ -150,36 +175,66 @@ Cada caso mantém seu próprio histórico de mensagens enviado à IA, evitando q
 
 ```
 bot-advogado-telegram/
-├── index.js              # 🎯 Servidor Express + webhook Telegram
+├── index.js              # 🎯 Servidor Express + webhook Telegram + rotas /admin (HTML)
 ├── config.js             # ⚙️ Configurações e variáveis de ambiente
-├── database.js           # 💾 Conexão MongoDB e persistência
+├── database.js           # 💾 Conexão MongoDB e persistência (bot + web)
 ├── gemini.js             # 🤖 Integração com Google Gemini
-├── pdf.js                # 📄 Processamento de PDFs
+├── pdf.js                # 📄 Processamento de PDFs (Telegram e upload web)
 ├── word.js               # 📝 Geração de documentos DOCX
-├── lib/                  # 🧩 Helpers reutilizáveis (webhook auth, rate limiter, dedup, retry)
+├── lib/                  # 🧩 Helpers reutilizáveis (webhook auth, admin auth, auth web, rate limiter, dedup, retry, especialidades)
+├── routes/
+│   └── api.js             # 🔌 API REST consumida pelo frontend web (/api/*)
+├── web/                  # 🌐 Frontend React + Vite (portal web MVP)
+│   ├── src/
+│   │   ├── pages/         # Login, Registro, Dashboard, Chat, Casos, PDF, Documentos, Advogados, Admin
+│   │   ├── components/    # Layout, RequireAuth
+│   │   ├── context/       # AuthContext (sessão do usuário web)
+│   │   └── api/           # Cliente fetch para a API REST
+│   └── vite.config.js
 ├── tests/                # 🧪 Testes automatizados (Vitest)
 ├── .github/workflows/    # ⚙️ CI (GitHub Actions)
-├── package.json          # 📦 Dependências
+├── package.json          # 📦 Dependências do backend
 └── README.md             # 📚 Este arquivo
 ```
 
 ## 🔌 API Endpoints
 
-### Públicos
+### Bot do Telegram (legado, sem alterações)
 - `GET /health` - Status do serviço
 - `POST /webhook` - Webhook do Telegram (valida `x-telegram-bot-api-secret-token` quando `TELEGRAM_WEBHOOK_SECRET` está configurado)
+- `GET /admin`, `POST /admin/lawyers/:id/status`, `GET /admin/stats`, `POST /admin/clear-history` - Painel HTML legado (requer `ADMIN_PANEL_KEY`)
+- `GET /admin/lawyer-dashboard`, `POST /admin/lawyer-dashboard/convert` - Painel do advogado (token assinado emitido pelo bot)
 
-### Admin (requer `ADMIN_PANEL_KEY`)
-- `GET /admin` - Painel web
-- `GET /admin/stats` - Estatísticas JSON
-- `POST /admin/clear-history` - Limpar histórico global (requer confirmação, veja abaixo)
-- `POST /admin/lawyers/:id/status` - Avançar perfil de `pending_verification` para `verified` e depois `active`
+### API REST (`/api/*`), consumida pelo frontend web em `web/`
 
-### Painel do advogado (requer token assinado emitido pelo bot)
-- `GET /admin/lawyer-dashboard?token=...` - Painel do advogado com token temporário emitido pelo bot
-- `POST /admin/lawyer-dashboard/convert` - Marcar uma indicação como convertida, validando token e vínculo com advogado
+**Autenticação (sessão via cookie `httpOnly`)**
+- `POST /api/auth/register` - Cria conta (`email`, `password`, `name`)
+- `POST /api/auth/login` - Login (`email`, `password`)
+- `POST /api/auth/logout` - Encerra a sessão
+- `GET /api/auth/me` - Retorna o usuário autenticado
 
-Autenticação: envie a chave no header `x-admin-key: sua_chave_admin` (recomendado). O uso de `?key=...` na query string continua funcionando apenas por retrocompatibilidade e é registrado como aviso nos logs, pois URLs com chave podem ficar salvas em logs e no histórico do navegador.
+**Chat e casos** (requerem sessão autenticada)
+- `GET /api/specializations` - Lista as áreas jurídicas disponíveis
+- `POST /api/chat` - Envia mensagem ao Gemini (`message`, `caseId` opcional)
+- `GET /api/cases` - Lista os casos do usuário
+- `POST /api/cases` - Cria um novo caso (`title`, `specialization` opcionais)
+- `PATCH /api/cases/:id/select` - Define o caso ativo
+- `GET /api/cases/:id/messages` - Histórico de mensagens do caso
+
+**Documentos**
+- `POST /api/documents/analyze-pdf` - Analisa um PDF enviado em base64 (`contentBase64`, `filename`, `question`, `caseId` opcionais; limite de 8MB)
+- `POST /api/documents/generate` - Gera e retorna um `.docx` (`title`, `content`)
+
+**Advogados**
+- `GET /api/lawyers?specialization=...&state=...` - Busca advogados ativos por especialidade
+- `POST /api/lawyers/register` - Cadastra um advogado (requer sessão autenticada; fica `pending_verification` até aprovação administrativa)
+
+**Administração (requer header `x-admin-key`, mesma chave `ADMIN_PANEL_KEY`)**
+- `GET /api/admin/stats` - Estatísticas gerais
+- `GET /api/admin/lawyers` - Lista advogados pendentes/verificados
+- `PATCH /api/admin/lawyers/:id/status` - Avança o status do advogado (`verified` → `active`)
+
+Autenticação do painel admin (rotas legadas e API): envie a chave no header `x-admin-key: sua_chave_admin` (recomendado). O uso de `?key=...` na query string continua funcionando apenas por retrocompatibilidade e é registrado como aviso nos logs, pois URLs com chave podem ficar salvas em logs e no histórico do navegador. **A chave nunca é embutida no bundle do frontend** — o painel web (`/admin` no React) pede que o administrador a digite a cada acesso, exatamente como o painel HTML legado.
 
 `POST /admin/clear-history` é uma ação destrutiva e exige o campo `confirm` com o valor exato `CONFIRMAR` no corpo da requisição, além da autenticação:
 ```bash
@@ -195,11 +250,16 @@ curl -X POST https://seu-dominio.com/admin/clear-history \
 - ✅ Webhook protegido por segredo compartilhado (`TELEGRAM_WEBHOOK_SECRET`), com resposta `401` em caso de segredo inválido
 - ✅ Deduplicação de `update_id` do Telegram, evitando processamento duplicado
 - ✅ Rate limiting por usuário com limpeza periódica de usuários inativos (evita crescimento de memória)
-- ✅ Autenticação do painel admin via header `x-admin-key` (query string mantida só por compatibilidade)
+- ✅ Autenticação do painel admin via header `x-admin-key` (query string mantida só por compatibilidade), reutilizada pelas rotas HTML legadas e pela API REST
 - ✅ Confirmação obrigatória para limpar todo o histórico via painel admin
 - ✅ Sanitização de nomes de arquivo
 - ✅ Retentativas com backoff curto para chamadas críticas ao Telegram e ao Gemini
 - ✅ Tratamento de erros robusto, sem expor segredos/tokens em logs
+- ✅ Sessão da API web assinada (HMAC) e armazenada em cookie `httpOnly`/`SameSite=Lax` (e `Secure` em produção); nunca em `localStorage`
+- ✅ Senhas da conta web com hash + salt via `scrypt` (nativo do Node, sem dependências extras)
+- ✅ Nenhum segredo (`GEMINI_API_KEY`, `TELEGRAM_BOT_TOKEN`, `ADMIN_PANEL_KEY`) é enviado ao frontend; o painel admin do React solicita a chave a cada acesso, apenas para uso imediato na requisição
+- ✅ Upload de PDF validado por extensão e limite de tamanho (8MB) antes do processamento
+- ✅ CORS da API restrito às origens configuradas em `WEB_APP_ORIGIN`
 
 ## 🧪 Testes
 
@@ -216,6 +276,8 @@ Os testes cobrem, entre outros pontos:
 - Rate limiting básico e limpeza de usuários inativos (`lib/rateLimiter.js`)
 - Retentativas com backoff (`lib/retry.js`)
 - Reset seguro de dados do usuário quando o MongoDB está indisponível (`database.js`)
+- Hash/verificação de senha e tokens de sessão da API web (`lib/webAuth.js`)
+
 
 ## 🔁 Deduplicação e limites
 
