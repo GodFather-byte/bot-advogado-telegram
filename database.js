@@ -94,6 +94,21 @@ const referralSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+const webUserSchema = new mongoose.Schema(
+  {
+    email: { type: String, required: true, unique: true, lowercase: true, trim: true, maxlength: 254 },
+    passwordHash: { type: String, required: true },
+    name: { type: String, default: '', maxlength: 120 },
+    role: { type: String, enum: ['user', 'admin'], default: 'user' },
+    specialization: { type: String, default: null },
+    location: {
+      state: { type: String, default: null },
+      city: { type: String, default: null },
+    },
+  },
+  { timestamps: true }
+);
+
 const specializationSchema = new mongoose.Schema(
   {
     code: { type: String, required: true, unique: true },
@@ -119,6 +134,7 @@ const User = mongoose.models.User || mongoose.model('User', userSchema);
 const Lawyer = mongoose.models.Lawyer || mongoose.model('Lawyer', lawyerSchema);
 const Referral = mongoose.models.Referral || mongoose.model('Referral', referralSchema);
 const Specialization = mongoose.models.Specialization || mongoose.model('Specialization', specializationSchema);
+const WebUser = mongoose.models.WebUser || mongoose.model('WebUser', webUserSchema);
 
 let connectionPromise;
 
@@ -378,6 +394,44 @@ export const dbCases = {
 
       return {
         number: Number(number),
+        id: String(targetCase._id),
+        title: targetCase.title,
+        specialization: targetCase.specialization || null,
+        isActive: true,
+      };
+    } catch (error) {
+      console.error('[ERRO DB] Falha ao selecionar caso:', error.message);
+      return null;
+    }
+  },
+
+  // Usado pela API web, que referencia casos por id (retornado nas
+  // listagens) em vez do número sequencial usado nos comandos do bot.
+  async getCaseForUser(userId, caseId) {
+    if (mongoose.connection.readyState !== 1 || !mongoose.Types.ObjectId.isValid(caseId)) return null;
+
+    try {
+      return await Case.findOne({ _id: caseId, userId: String(userId) }).lean();
+    } catch (error) {
+      console.error('[ERRO DB] Falha ao buscar caso do usuário:', error.message);
+      return null;
+    }
+  },
+
+  async setActiveCaseById(userId, caseId) {
+    if (mongoose.connection.readyState !== 1 || !mongoose.Types.ObjectId.isValid(caseId)) return null;
+
+    try {
+      const targetCase = await Case.findOne({ _id: caseId, userId: String(userId) }).lean();
+      if (!targetCase) return null;
+
+      await UserCaseState.findOneAndUpdate(
+        { userId: String(userId) },
+        { userId: String(userId), activeCaseId: targetCase._id },
+        { upsert: true }
+      );
+
+      return {
         id: String(targetCase._id),
         title: targetCase.title,
         specialization: targetCase.specialization || null,
@@ -673,6 +727,42 @@ export const dbReferrals = {
     } catch (error) {
       console.error('[ERRO DB] Falha ao marcar indicação como convertida:', error.message);
       return false;
+    }
+  },
+};
+
+// Usuários da API web (login/registro do site), independentes do fluxo do
+// bot do Telegram, mas compartilhando histórico/casos/advogados através do
+// mesmo `userId` (aqui, o _id do WebUser).
+export const dbWebUsers = {
+  async create(email, passwordHash, name) {
+    if (mongoose.connection.readyState !== 1) return null;
+    try {
+      const user = await WebUser.create({ email: String(email).toLowerCase().trim(), passwordHash, name: name || '' });
+      return user.toObject();
+    } catch (error) {
+      console.error('[ERRO DB] Falha ao criar usuário web:', error.message);
+      return null;
+    }
+  },
+
+  async findByEmail(email) {
+    if (mongoose.connection.readyState !== 1) return null;
+    try {
+      return await WebUser.findOne({ email: String(email || '').toLowerCase().trim() }).lean();
+    } catch (error) {
+      console.error('[ERRO DB] Falha ao buscar usuário web:', error.message);
+      return null;
+    }
+  },
+
+  async findById(id) {
+    if (mongoose.connection.readyState !== 1 || !mongoose.Types.ObjectId.isValid(id)) return null;
+    try {
+      return await WebUser.findById(id).lean();
+    } catch (error) {
+      console.error('[ERRO DB] Falha ao buscar usuário web por id:', error.message);
+      return null;
     }
   },
 };

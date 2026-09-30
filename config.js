@@ -28,6 +28,10 @@ export const config = {
     .map((id) => id.trim())
     .filter(Boolean),
   adminPanelKey: process.env.ADMIN_PANEL_KEY || '',
+  // Segredo usado para assinar sessões da API web (login/registro do site).
+  // Cai para o token do bot quando não definido para simplificar o setup local;
+  // em produção defina SESSION_SECRET com um valor próprio e aleatório.
+  sessionSecret: process.env.SESSION_SECRET || process.env.TELEGRAM_BOT_TOKEN || '',
   publicUrl: process.env.PUBLIC_URL || 'http://localhost:3000',
   rateLimitPerMinute: Number(process.env.RATE_LIMIT_PER_MINUTE || 10),
   rateLimitWindowMs: Number(process.env.RATE_LIMIT_WINDOW_MS || 60000),
