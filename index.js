@@ -1,4 +1,5 @@
 import express from 'express';
+import rateLimit from 'express-rate-limit';
 import axios from 'axios';
 import FormData from 'form-data';
 import { askGemini } from './gemini.js';
@@ -39,6 +40,14 @@ const rateLimiter = createRateLimiter({
   windowMs: config.rateLimitWindowMs,
 });
 rateLimiter.start();
+
+const lawyerDashboardLimiter = rateLimit({
+  windowMs: config.rateLimitWindowMs,
+  limit: config.rateLimitPerMinute,
+  standardHeaders: 'draft-8',
+  legacyHeaders: false,
+  handler: (_req, res) => res.status(429).send('Muitas tentativas. Aguarde antes de tentar novamente.'),
+});
 
 const updateDeduplicator = createUpdateDeduplicator();
 const lawyerRegistration = new Map();
@@ -806,11 +815,7 @@ app.post('/admin/lawyers/:id/status', async (req, res) => {
   res.type('html').send(`<!DOCTYPE html><html lang="pt-BR"><meta charset="UTF-8"><p>Perfil de ${escapeHtmlAttribute(lawyer.name)} atualizado para ${escapeHtmlAttribute(lawyer.status)}.</p><p><a href="/admin${req.body?.key ? `?key=${encodeURIComponent(req.body.key)}` : ''}">Voltar ao painel</a></p></html>`);
 });
 
-app.get('/admin/lawyer-dashboard', async (req, res) => {
-  if (rateLimiter.isRateLimited(`lawyer-dashboard:${req.ip}`)) {
-    res.status(429).send('Muitas tentativas. Aguarde antes de tentar novamente.');
-    return;
-  }
+app.get('/admin/lawyer-dashboard', lawyerDashboardLimiter, async (req, res) => {
   const telegramId = verifyLawyerDashboardToken(req.query.token, config.telegramBotToken);
   if (!telegramId) {
     res.status(401).send('Link inválido ou expirado. Solicite um novo link com /dashboard_advogado no Telegram.');
@@ -825,11 +830,7 @@ app.get('/admin/lawyer-dashboard', async (req, res) => {
   res.type('html').send(renderLawyerDashboard(data));
 });
 
-app.post('/admin/lawyer-dashboard/convert', async (req, res) => {
-  if (rateLimiter.isRateLimited(`lawyer-dashboard:${req.ip}`)) {
-    res.status(429).send('Muitas tentativas. Aguarde antes de tentar novamente.');
-    return;
-  }
+app.post('/admin/lawyer-dashboard/convert', lawyerDashboardLimiter, async (req, res) => {
   const telegramId = verifyLawyerDashboardToken(req.body?.token, config.telegramBotToken);
   if (!telegramId) {
     res.status(401).send('Link inválido ou expirado. Solicite um novo link com /dashboard_advogado no Telegram.');
