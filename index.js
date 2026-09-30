@@ -26,12 +26,35 @@ import {
   parseOab,
   verifyLawyerDashboardToken,
 } from './lib/lawyers.js';
+import { isAdminRequestAuthorized } from './lib/adminAuth.js';
+import { createApiRouter } from './routes/api.js';
 
 validateConfig();
 
 const app = express();
-app.use(express.json({ limit: '1mb' }));
+app.use(express.json({ limit: '12mb' }));
 app.use(express.urlencoded({ extended: true }));
+
+const allowedWebOrigins = String(process.env.WEB_APP_ORIGIN || 'http://localhost:5173')
+  .split(',')
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+
+app.use('/api', (req, res, next) => {
+  const origin = req.headers.origin;
+  if (origin && allowedWebOrigins.includes(origin)) {
+    res.header('Access-Control-Allow-Origin', origin);
+    res.header('Access-Control-Allow-Credentials', 'true');
+    res.header('Vary', 'Origin');
+  }
+  res.header('Access-Control-Allow-Headers', 'Content-Type, x-admin-key');
+  res.header('Access-Control-Allow-Methods', 'GET,POST,PATCH,DELETE,OPTIONS');
+  if (req.method === 'OPTIONS') {
+    res.sendStatus(204);
+    return;
+  }
+  next();
+});
 
 const TELEGRAM_API = `https://api.telegram.org/bot${config.telegramBotToken}`;
 
@@ -167,26 +190,13 @@ function renderLawyerDashboard(data) {
     <section class="card"><h2>Contato</h2><p>${escapeHtmlAttribute(lawyer.phone)}${lawyer.telegramUsername ? ` · @${escapeHtmlAttribute(lawyer.telegramUsername)}` : ''}</p><p>${escapeHtmlAttribute(lawyer.bio)}</p><p class="muted">Dados de contato dos usuários aparecem somente após consentimento explícito.</p></section>
   </main></body></html>`;
 }
-function getProvidedAdminKey(req) {
-  const headerKey = req.headers['x-admin-key'];
-  const queryKey = req.query.key;
-  const bodyKey = req.body?.key;
-
-  if (!headerKey && (queryKey || bodyKey)) {
-    console.warn('[ADMIN] Chave recebida via query/body. Prefira o header x-admin-key para evitar exposição em logs/histórico do navegador.');
-  }
-
-  return headerKey || queryKey || bodyKey || '';
-}
-
 function ensureAdminPanelAccess(req, res) {
   if (!config.adminPanelKey) {
     res.status(503).send('Painel administrativo desabilitado. Defina ADMIN_PANEL_KEY no ambiente.');
     return false;
   }
 
-  const providedKey = getProvidedAdminKey(req);
-  if (providedKey !== config.adminPanelKey) {
+  if (!isAdminRequestAuthorized(req, config.adminPanelKey)) {
     res.status(401).send('Acesso negado. Informe a chave correta via header x-admin-key (recomendado) ou no parâmetro ?key=... (compatibilidade).');
     return false;
   }
@@ -794,6 +804,8 @@ async function processCallbackQuery(callback) {
 app.get('/health', (_req, res) => {
   res.json({ status: 'ok', service: 'bot-advogado-telegram', timestamp: new Date().toISOString() });
 });
+
+app.use('/api', createApiRouter());
 
 app.get('/admin', async (req, res) => {
   if (!ensureAdminPanelAccess(req, res)) return;

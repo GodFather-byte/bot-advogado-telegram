@@ -17,11 +17,21 @@ export async function lerPdfDoTelegram(fileId, botToken) {
       timeout: 30000,
       maxContentLength: 10 * 1024 * 1024,
     });
-    const pdfData = await pdfParse(response.data);
-
-    return pdfData.text?.trim().slice(0, config.maxPdfCharacters) || null;
+    return await lerPdfDeBuffer(response.data);
   } catch (error) {
     console.error('[ERRO PDF] Falha ao ler o arquivo:', error.message);
+    return null;
+  }
+}
+
+// Usado tanto pelo upload web (buffer decodificado de base64) quanto,
+// internamente, pela leitura via Telegram acima.
+export async function lerPdfDeBuffer(buffer) {
+  try {
+    const pdfData = await pdfParse(buffer);
+    return pdfData.text?.trim().slice(0, config.maxPdfCharacters) || null;
+  } catch (error) {
+    console.error('[ERRO PDF] Falha ao ler o buffer:', error.message);
     return null;
   }
 }

@@ -6,8 +6,12 @@
   "type": "module",
   "scripts": {
     "start": "node index.js",
+    "dev": "node index.js",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "web:install": "npm install --prefix web",
+    "web:dev": "npm run dev --prefix web",
+    "web:build": "npm run build --prefix web"
   },
   "dependencies": {
     "@google/generative-ai": "^0.21.0",
