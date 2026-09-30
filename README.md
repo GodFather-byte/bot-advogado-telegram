@@ -5,6 +5,8 @@ Bot de Telegram inteligente que oferece consulta jurídica assistida por IA, an�
 ## 🚀 Funcionalidades
 
 - 💬 **Consulta Jurídica com IA**: Respostas baseadas em Gemini (Google)
+- ⚖️ **Especialização jurídica**: Contexto específico para sete áreas, associado ao usuário e ao caso ativo
+- 👩‍⚖️ **Rede de advogados**: Cadastro, análise administrativa, recomendações e acompanhamento de indicações, sem integração de pagamentos
 - 📄 **Análise de PDFs**: Envie documentos para análise e obtenha parecer automatizado
 - 📝 **Geração de Documentos**: Crie procurações, contratos, petições e mais em DOCX
 - 💾 **Histórico de Conversas**: Integração com MongoDB para persistência de dados
@@ -109,9 +111,18 @@ Também compatível com:
 | `/status` | Verifica se bot está online |
 | `/sobre` | Informações sobre o bot |
 | `/documentos` | Tipos de documentos disponíveis |
+| `/especialidade` | Escolhe uma das sete áreas jurídicas; também aceita um número ou código |
+| `/minha_especialidade` | Mostra a área jurídica atual |
+| `/minha_localizacao <UF, cidade>` | Define a localização usada para priorizar recomendações |
+| `/advogados` | Mostra até três advogados ativos da sua especialidade |
 | `/novo_caso [título]` | Cria um novo caso e o torna ativo |
 | `/casos` | Lista os casos do usuário e destaca o ativo |
 | `/caso <número>` | Troca o caso ativo |
+| `/registrar_advogado` | Inicia o cadastro de advogado (requer aprovação administrativa) |
+| `/meu_perfil` | Mostra o perfil e as estatísticas do advogado |
+| `/editar_perfil <campo> <valor>` | Edita bio, telefone, especialidades, cidade, estado ou username do Telegram |
+| `/dashboard_advogado` | Gera um link temporário e assinado para o painel de indicações |
+| `/marcar_indicacao <id> convertida` | Registra manualmente uma conversão |
 | `/admin` | Acessa painel administrativo (admin) |
 | `/resetar` | Limpa histórico e casos da conversa (admin) |
 
@@ -122,8 +133,18 @@ O bot permite organizar as conversas em "casos" independentes por usuário:
 - `/novo_caso [título]` cria um novo caso (com título opcional) e o define como ativo. Todas as mensagens seguintes ficam associadas a esse caso.
 - `/casos` lista os casos já criados, numerados, indicando qual está ativo no momento.
 - `/caso <número>` troca o caso ativo usando o número exibido em `/casos`.
+- `/especialidade` define a área do usuário; `/novo_caso` salva a área escolhida no novo caso. Ao alternar casos, a IA usa a especialidade daquele caso, quando definida.
+- O catálogo (Família, Trabalhista, Civil, Imobiliário, Tributário, Criminal e Empresarial), incluindo seus prompts, referências legislativas e palavras-chave, é atualizado na coleção `specializations` ao conectar ao MongoDB.
 
-Cada caso mantém seu próprio histórico de mensagens enviado à IA, evitando que o contexto de assuntos diferentes se misture. Requer `MONGODB_URI` configurado; sem banco de dados, os comandos de caso informam que a funcionalidade está indisponível.
+Cada caso mantém seu próprio histórico de mensagens enviado à IA, evitando que o contexto de assuntos diferentes se misture. A especialidade informa à IA a área, as referências e o tribunal estadual pertinente. O prompt orienta a não inventar citações: decisões recentes STF/STJ e precedentes estaduais devem ser identificáveis e verificáveis; sem fonte atual, a resposta deve explicitar essa limitação.
+
+## 👩‍⚖️ Rede de advogados (sem pagamentos)
+
+- `/registrar_advogado` solicita nome, OAB/UF, áreas, estado/cidade, telefone, breve bio e username do Telegram. O formato da OAB é validado antes do envio; o cadastro fica como `pending_verification`.
+- No painel `/admin`, administradores podem verificar a OAB e, em uma etapa separada, ativar o perfil. Somente perfis `active` são recomendados.
+- `/advogados` recomenda até três perfis ativos da especialidade escolhida, priorizando o estado informado em `/minha_localizacao`. Consultas jurídicas consideradas complexas também podem exibir recomendações. Não há cobrança ou comissão automatizada.
+- Ao tocar em **Enviar mensagem**, o usuário precisa consentir explicitamente. Nome e Telegram só são compartilhados com o advogado após o consentimento; sem ele, o referral fica sem contato.
+- `/meu_perfil` e `/dashboard_advogado` permitem consultar perfil e indicações. O link do painel é assinado e expira em 15 minutos; solicite um novo pelo bot quando expirar. Conversões podem ser marcadas no painel ou por `/marcar_indicacao`.
 
 ## 🏗️ Estrutura do Projeto
 
@@ -152,6 +173,11 @@ bot-advogado-telegram/
 - `GET /admin` - Painel web
 - `GET /admin/stats` - Estatísticas JSON
 - `POST /admin/clear-history` - Limpar histórico global (requer confirmação, veja abaixo)
+- `POST /admin/lawyers/:id/status` - Avançar perfil de `pending_verification` para `verified` e depois `active`
+
+### Painel do advogado (requer token assinado emitido pelo bot)
+- `GET /admin/lawyer-dashboard?token=...` - Painel do advogado com token temporário emitido pelo bot
+- `POST /admin/lawyer-dashboard/convert` - Marcar uma indicação como convertida, validando token e vínculo com advogado
 
 Autenticação: envie a chave no header `x-admin-key: sua_chave_admin` (recomendado). O uso de `?key=...` na query string continua funcionando apenas por retrocompatibilidade e é registrado como aviso nos logs, pois URLs com chave podem ficar salvas em logs e no histórico do navegador.
 

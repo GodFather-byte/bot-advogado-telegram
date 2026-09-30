@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import mongoose from 'mongoose';
-import { dbChat, dbCases } from '../database.js';
+import { dbChat, dbCases, dbUsers, dbLawyers, dbReferrals } from '../database.js';
 
 // Sem MONGODB_URI configurado, mongoose nunca se conecta neste teste, então
 // mongoose.connection.readyState permanece diferente de 1 (conectado).
@@ -25,5 +25,13 @@ describe('reset de dados do usuário sem MongoDB disponível', () => {
 
   it('dbCases.listCases retorna lista vazia sem lançar erro', async () => {
     await expect(dbCases.listCases('usuario-teste')).resolves.toEqual([]);
+  });
+
+  it('as operações de especialidade e perfil são no-op seguro sem MongoDB', async () => {
+    await expect(dbUsers.getUser('usuario-teste')).resolves.toBeNull();
+    await expect(dbUsers.setSpecialization('usuario-teste', 'direito_civil')).resolves.toBe(false);
+    await expect(dbLawyers.getByTelegramId('advogado-teste')).resolves.toBeNull();
+    await expect(dbLawyers.register({ telegramId: 'advogado-teste' })).resolves.toBeNull();
+    await expect(dbReferrals.create('usuario-teste', 'advogado-teste', 'direito_civil')).resolves.toBeNull();
   });
 });
