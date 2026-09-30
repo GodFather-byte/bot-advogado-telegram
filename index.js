@@ -250,9 +250,13 @@ function userDisplayName(from = {}) {
 }
 
 function parseLocation(text) {
-  const match = String(text || '').trim().match(/^([A-Za-z]{2})\s*[, -]\s*(.+)$/);
-  if (!match || !isValidBrazilianState(match[1]) || match[2].trim().length < 2 || match[2].trim().length > 100) return null;
-  return { state: match[1].toUpperCase(), city: match[2].trim() };
+  const value = String(text || '').trim();
+  if (value.length > 105) return null;
+  const state = value.slice(0, 2);
+  const separator = value.charAt(2);
+  const city = value.slice(3).trim();
+  if (!isValidBrazilianState(state) || ![',', ' ', '-'].includes(separator) || city.length < 2 || city.length > 100) return null;
+  return { state: state.toUpperCase(), city };
 }
 
 function parsePhone(text) {
@@ -803,6 +807,10 @@ app.post('/admin/lawyers/:id/status', async (req, res) => {
 });
 
 app.get('/admin/lawyer-dashboard', async (req, res) => {
+  if (rateLimiter.isRateLimited(`lawyer-dashboard:${req.ip}`)) {
+    res.status(429).send('Muitas tentativas. Aguarde antes de tentar novamente.');
+    return;
+  }
   const telegramId = verifyLawyerDashboardToken(req.query.token, config.telegramBotToken);
   if (!telegramId) {
     res.status(401).send('Link inválido ou expirado. Solicite um novo link com /dashboard_advogado no Telegram.');
@@ -818,6 +826,10 @@ app.get('/admin/lawyer-dashboard', async (req, res) => {
 });
 
 app.post('/admin/lawyer-dashboard/convert', async (req, res) => {
+  if (rateLimiter.isRateLimited(`lawyer-dashboard:${req.ip}`)) {
+    res.status(429).send('Muitas tentativas. Aguarde antes de tentar novamente.');
+    return;
+  }
   const telegramId = verifyLawyerDashboardToken(req.body?.token, config.telegramBotToken);
   if (!telegramId) {
     res.status(401).send('Link inválido ou expirado. Solicite um novo link com /dashboard_advogado no Telegram.');

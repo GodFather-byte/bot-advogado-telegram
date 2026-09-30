@@ -43,7 +43,9 @@ describe('especializações jurídicas', () => {
 describe('cadastro e acesso de advogados', () => {
   it('valida OAB com UF brasileira', () => {
     expect(parseOab('SP123456')).toEqual({ state: 'SP', number: 'SP123456' });
+    expect(parseOab('SP 123456')).toEqual({ state: 'SP', number: 'SP123456' });
     expect(parseOab('123456 XX')).toBeNull();
+    expect(parseOab(`SP${' '.repeat(1000)}123456`)).toBeNull();
   });
 
   it('emite token temporário assinado, válido apenas para o Telegram ID correto', () => {
