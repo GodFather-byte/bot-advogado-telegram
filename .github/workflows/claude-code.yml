@@ -1,0 +1,40 @@
+name: Claude Code Action
+
+on:
+  issues:
+    types: [labeled]
+  pull_request:
+    types: [opened, synchronize]
+  issue_comment:
+    types: [created]
+
+jobs:
+  claude:
+    # Corre apenas se uma issue tiver a etiqueta 'claude' ou se alguém comentar '@claude'
+    if: contains(github.event.issue.labels.*.name, 'claude') || contains(github.event.comment.body, '@claude')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+
+    steps:
+      - name: Checkout do Repositório
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configurar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Instalar Claude Code CLI
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Executar Claude Code
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          claude -p "Analisa a issue/comentário e implementa as alterações necessárias com commits descritivos."
